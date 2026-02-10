@@ -100,6 +100,7 @@ fn handle_normal_key(app: &mut App, key: KeyEvent) -> bool {
         KeyCode::F(9) | KeyCode::Char('x') => {
             if !app.filtered_processes.is_empty() {
                 app.kill_signal_idx = 0;
+                app.pre_kill_mode = AppMode::Normal;
                 app.mode = AppMode::Kill;
             }
         }
@@ -217,11 +218,11 @@ fn handle_visual_key(app: &mut App, key: KeyEvent) -> bool {
             app.mode = AppMode::Normal;
         }
 
-        // F9/x: tag the visual range, open kill dialog, exit visual mode
+        // F9/x: tag the visual range, open kill dialog (return to visual on cancel)
         KeyCode::F(9) | KeyCode::Char('x') => {
             app.tag_visual_range();
-            app.visual_anchor = None;
             app.kill_signal_idx = 0;
+            app.pre_kill_mode = AppMode::Visual;
             app.mode = AppMode::Kill;
         }
 
@@ -276,7 +277,10 @@ fn handle_help_key(app: &mut App, key: KeyEvent) -> bool {
 fn handle_kill_key(app: &mut App, key: KeyEvent) -> bool {
     let signals = signal_list();
     match key.code {
-        KeyCode::Esc => app.mode = AppMode::Normal,
+        KeyCode::Esc => {
+            app.untag_all();
+            app.mode = app.pre_kill_mode;
+        }
         KeyCode::Up | KeyCode::Char('k') => {
             if app.kill_signal_idx > 0 {
                 app.kill_signal_idx -= 1;
@@ -291,6 +295,8 @@ fn handle_kill_key(app: &mut App, key: KeyEvent) -> bool {
             if let Some((sig_num, _)) = signals.get(app.kill_signal_idx) {
                 app.send_signal(*sig_num);
             }
+            app.untag_all();
+            app.visual_anchor = None;
             app.mode = AppMode::Normal;
         }
         _ => {}

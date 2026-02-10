@@ -73,6 +73,7 @@ pub struct App {
 
     // Kill dialog
     pub kill_signal_idx: usize,
+    pub pre_kill_mode: AppMode,
 
     // Vim multi-key sequences
     pub pending_key: Option<char>,
@@ -140,6 +141,7 @@ impl App {
             active_filter: String::new(),
             user_filter: None,
             kill_signal_idx: 0,
+            pre_kill_mode: AppMode::Normal,
             pending_key: None,
             jump_list: Vec::new(),
             jump_pos: 0,
@@ -434,6 +436,15 @@ impl App {
             }
         }
         self.move_selection(1);
+    }
+
+    pub fn untag_all(&mut self) {
+        for p in &mut self.filtered_processes {
+            p.tagged = false;
+        }
+        for p in &mut self.all_processes {
+            p.tagged = false;
+        }
     }
 
     // --- Jump list ---
