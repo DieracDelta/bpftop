@@ -23,6 +23,126 @@
             inherit system;
           });
     in {
+      packages = forAllSystems ({ pkgs, system }:
+        let
+          rustNightly = pkgs.rust-bin.nightly.latest.default.override {
+            extensions = [ "rust-src" ];
+          };
+
+          workspaceVendor = pkgs.rustPlatform.fetchCargoVendor {
+            src = ./.;
+            hash = "sha256-Nycj6xfkJTsDESy0P5EvqV9iI/bAmYUGS9Xa41Pyp/o=";
+          };
+
+          # Combined LLVM 22 (dev + lib outputs merged for bpf-linker's build script)
+          llvm22 = pkgs.symlinkJoin {
+            name = "llvm-22-combined";
+            paths = [ pkgs.llvmPackages_22.llvm.dev pkgs.llvmPackages_22.llvm.lib ];
+          };
+
+          # bpf-linker v0.10.1 with LLVM 22 (matches nightly Rust's LLVM)
+          bpfLinker = pkgs.rustPlatform.buildRustPackage rec {
+            pname = "bpf-linker";
+            version = "0.10.1";
+            src = pkgs.fetchFromGitHub {
+              owner = "aya-rs";
+              repo = "bpf-linker";
+              tag = "v${version}";
+              hash = "sha256-WFMQlaM18v5FsrsjmAl1nPGNMnBW3pjXmkfOfv3Izq0=";
+            };
+            cargoHash = "sha256-m/mlN1EL5jYxprNXvMbuVzBsewdIOFX0ebNQWfByEHQ=";
+            buildNoDefaultFeatures = true;
+            buildFeatures = [ "llvm-${pkgs.lib.versions.major pkgs.llvmPackages_22.llvm.version}" ];
+            LLVM_PREFIX = "${llvm22}";
+            nativeBuildInputs = [ llvm22 ];
+            buildInputs = [ pkgs.zlib pkgs.libxml2 ];
+            doCheck = false;
+          };
+
+          # Custom FOD: vendors eBPF deps + std library deps (needed for -Z build-std=core)
+          ebpfVendor = pkgs.stdenvNoCC.mkDerivation {
+            name = "bpftop-ebpf-vendor";
+            src = ./.;
+            postUnpack = "sourceRoot=$sourceRoot/bpftop-ebpf";
+            nativeBuildInputs = [ rustNightly pkgs.cacert ];
+            dontBuild = true;
+            dontFixup = true;
+            installPhase = ''
+              mkdir -p $out/.cargo
+              sysroot=$(rustc --print sysroot)
+              HOME=$(mktemp -d) cargo vendor \
+                --locked \
+                --sync "$sysroot/lib/rustlib/src/rust/library/Cargo.toml" \
+                $out 2>/dev/null > vendor-config.toml
+              sed "s|$out|@vendor@|g" vendor-config.toml > $out/.cargo/config.toml
+            '';
+            outputHashMode = "recursive";
+            outputHashAlgo = "sha256";
+            outputHash = "sha256-J7H0kMUUfLr0sesuIih9Dm5VOOd0w9u5nfwNjT+QDqI=";
+          };
+        in {
+          default = pkgs.stdenv.mkDerivation {
+            pname = "bpftop";
+            version = "0.1.0";
+            src = ./.;
+
+            nativeBuildInputs = [
+              rustNightly
+              bpfLinker
+              pkgs.llvmPackages_22.clang
+              pkgs.llvmPackages_22.llvm
+              pkgs.pkg-config
+            ];
+
+            buildInputs = [ pkgs.elfutils ];
+
+            configurePhase = ''
+              runHook preConfigure
+
+              export HOME=$(mktemp -d)
+
+              # Vendor workspace deps (substitute @vendor@ placeholder)
+              mkdir -p .cargo
+              substitute ${workspaceVendor}/.cargo/config.toml .cargo/config.toml \
+                --subst-var-by vendor ${workspaceVendor}
+              echo '[alias]' >> .cargo/config.toml
+              echo 'xtask = "run --package xtask --"' >> .cargo/config.toml
+
+              # Vendor eBPF deps + linker config
+              mkdir -p bpftop-ebpf/.cargo
+              substitute ${ebpfVendor}/.cargo/config.toml bpftop-ebpf/.cargo/config.toml \
+                --subst-var-by vendor ${ebpfVendor}
+              echo '[target.bpfel-unknown-none]' >> bpftop-ebpf/.cargo/config.toml
+              echo 'linker = "bpf-linker"' >> bpftop-ebpf/.cargo/config.toml
+              echo 'rustflags = ["-Clink-arg=--btf"]' >> bpftop-ebpf/.cargo/config.toml
+
+              runHook postConfigure
+            '';
+
+            buildPhase = ''
+              runHook preBuild
+
+              # Phase 1: Build eBPF object
+              pushd bpftop-ebpf
+              cargo build --target bpfel-unknown-none -Z build-std=core --release
+              popd
+
+              # Phase 2: Build userspace (embeds eBPF via include_bytes_aligned!)
+              cargo build --release --bin bpftop
+
+              runHook postBuild
+            '';
+
+            installPhase = ''
+              runHook preInstall
+              mkdir -p $out/bin
+              cp target/release/bpftop $out/bin/
+              runHook postInstall
+            '';
+          };
+        }
+      );
+
       devShells = forAllSystems ({ pkgs, system }: {
         default = pkgs.mkShell {
           buildInputs = with pkgs; [
@@ -51,5 +171,18 @@
           '';
         };
       });
+
+      nixosModules.default = { config, lib, pkgs, ... }: {
+        options.programs.bpftop.enable = lib.mkEnableOption "bpftop process monitor";
+
+        config = lib.mkIf config.programs.bpftop.enable {
+          security.wrappers.bpftop = {
+            source = "${self.packages.${pkgs.system}.default}/bin/bpftop";
+            capabilities = "cap_bpf,cap_perfmon,cap_sys_resource=eip";
+            owner = "root";
+            group = "root";
+          };
+        };
+      };
     };
 }
