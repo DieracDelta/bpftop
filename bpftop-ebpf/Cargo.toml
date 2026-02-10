@@ -3,6 +3,10 @@ name = "bpftop-ebpf"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+arch-x86_64 = []
+arch-aarch64 = []
+
 [dependencies]
 aya-ebpf = { git = "https://github.com/aya-rs/aya", branch = "main" }
 bpftop-common = { path = "../bpftop-common", default-features = false }

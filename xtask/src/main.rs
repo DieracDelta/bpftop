@@ -42,6 +42,12 @@ fn build_ebpf(target: &str, _release: bool) -> Result<()> {
     let workspace_root = workspace_root();
     let ebpf_dir = workspace_root.join("bpftop-ebpf");
 
+    let arch_feature = match std::env::consts::ARCH {
+        "x86_64" => "arch-x86_64",
+        "aarch64" => "arch-aarch64",
+        other => bail!("unsupported architecture: {other}"),
+    };
+
     // eBPF programs MUST be built in release mode because debug builds
     // include core::fmt code that exceeds BPF's function argument limit.
     let mut cmd = Command::new("cargo");
@@ -54,6 +60,8 @@ fn build_ebpf(target: &str, _release: bool) -> Result<()> {
             "-Z",
             "build-std=core",
             "--release",
+            "--features",
+            arch_feature,
         ])
         .env(
             "CARGO_ENCODED_RUSTFLAGS",

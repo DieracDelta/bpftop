@@ -13,45 +13,80 @@ use bpftop_common::{CmdlineEvent, TaskInfo};
 // Kernel struct field byte offsets (Linux 6.12, from BTF)
 // ============================================================
 //
-// Generated from: bpftool btf dump file /sys/kernel/btf/vmlinux
+// Generated from: pahole -C <struct> /sys/kernel/btf/vmlinux
 // These are NOT portable across kernel versions. Without CO-RE
 // support in aya-ebpf, we must regenerate if the kernel changes.
+//
+// Build with --features arch-x86_64 or --features arch-aarch64.
 
-// task_struct
+#[cfg(not(any(feature = "arch-x86_64", feature = "arch-aarch64")))]
+compile_error!("must enable exactly one of: arch-x86_64, arch-aarch64");
+
+// --- task_struct offsets ---
+
+// Fields at identical offsets on both architectures (Linux 6.12):
 const TASK_STATE: usize = 24;       // __state: u32
 const TASK_PRIO: usize = 124;       // prio: i32
 const TASK_STATIC_PRIO: usize = 128; // static_prio: i32
-const TASK_MM: usize = 1712;        // mm: *mm_struct
-const TASK_PID: usize = 1840;       // pid (tid): pid_t
-const TASK_TGID: usize = 1844;      // tgid (pid): pid_t
-const TASK_REAL_PARENT: usize = 1856; // real_parent: *task_struct
-const TASK_UTIME: usize = 2064;     // utime: u64
-const TASK_STIME: usize = 2072;     // stime: u64
-const TASK_START_TIME: usize = 2184; // start_time: u64
-const TASK_CRED: usize = 2368;      // cred: *cred
-const TASK_COMM: usize = 2384;      // comm: [u8; 16]
-const TASK_CGROUPS: usize = 2872;   // cgroups: *css_set
 
-// cred
+#[cfg(feature = "arch-x86_64")]
+mod offsets {
+    // task_struct
+    pub const TASK_MM: usize = 1712;
+    pub const TASK_PID: usize = 1840;
+    pub const TASK_TGID: usize = 1844;
+    pub const TASK_REAL_PARENT: usize = 1856;
+    pub const TASK_UTIME: usize = 2064;
+    pub const TASK_STIME: usize = 2072;
+    pub const TASK_START_TIME: usize = 2184;
+    pub const TASK_CRED: usize = 2368;
+    pub const TASK_COMM: usize = 2384;
+    pub const TASK_CGROUPS: usize = 2872;
+    // mm_struct (rss_stat is percpu_counter[4]; each 40 bytes, count at +8)
+    pub const MM_TOTAL_VM: usize = 248;
+    pub const MM_ARG_START: usize = 368;
+    pub const MM_ARG_END: usize = 376;
+    pub const MM_RSS_FILE_COUNT: usize = 824;  // rss_stat[0].count
+    pub const MM_RSS_ANON_COUNT: usize = 864;  // rss_stat[1].count
+    pub const MM_RSS_SHMEM_COUNT: usize = 944; // rss_stat[3].count
+    // css_set
+    pub const CSS_SET_DFL_CGRP: usize = 136;
+}
+
+#[cfg(feature = "arch-aarch64")]
+mod offsets {
+    // task_struct
+    pub const TASK_MM: usize = 1616;
+    pub const TASK_PID: usize = 1744;
+    pub const TASK_TGID: usize = 1748;
+    pub const TASK_REAL_PARENT: usize = 1760;
+    pub const TASK_UTIME: usize = 1968;
+    pub const TASK_STIME: usize = 1976;
+    pub const TASK_START_TIME: usize = 2088;
+    pub const TASK_CRED: usize = 2272;
+    pub const TASK_COMM: usize = 2288;
+    pub const TASK_CGROUPS: usize = 2744;
+    // mm_struct (rss_stat is percpu_counter[4]; each 40 bytes, count at +8)
+    pub const MM_TOTAL_VM: usize = 232;
+    pub const MM_ARG_START: usize = 352;
+    pub const MM_ARG_END: usize = 360;
+    pub const MM_RSS_FILE_COUNT: usize = 792;  // rss_stat[0].count
+    pub const MM_RSS_ANON_COUNT: usize = 832;  // rss_stat[1].count
+    pub const MM_RSS_SHMEM_COUNT: usize = 912; // rss_stat[3].count
+    // css_set
+    pub const CSS_SET_DFL_CGRP: usize = 120;
+}
+
+use offsets::*;
+
+// cred (same on both architectures)
 const CRED_UID: usize = 8;          // uid: kuid_t
 const CRED_EUID: usize = 24;        // euid: kuid_t
 
-// mm_struct (inner anonymous struct at offset 0)
-const MM_TOTAL_VM: usize = 248;     // total_vm: unsigned long
-const MM_ARG_START: usize = 368;    // arg_start: unsigned long
-const MM_ARG_END: usize = 376;      // arg_end: unsigned long
-// rss_stat is percpu_counter[4] at offset 816; each is 40 bytes, count at +8
-const MM_RSS_FILE_COUNT: usize = 824;   // rss_stat[0].count (MM_FILEPAGES)
-const MM_RSS_ANON_COUNT: usize = 864;   // rss_stat[1].count (MM_ANONPAGES)
-const MM_RSS_SHMEM_COUNT: usize = 944;  // rss_stat[3].count (MM_SHMEMPAGES)
-
-// css_set
-const CSS_SET_DFL_CGRP: usize = 136; // dfl_cgrp: *cgroup
-
-// cgroup
+// cgroup (same on both architectures)
 const CGROUP_KN: usize = 256;       // kn: *kernfs_node
 
-// kernfs_node
+// kernfs_node (same on both architectures)
 const KN_ID: usize = 96;            // id: u64
 
 // ============================================================

@@ -122,12 +122,17 @@
                 runHook postConfigure
               '';
 
-              buildPhase = ''
+              buildPhase = let
+                archFeature = {
+                  "x86_64-linux" = "arch-x86_64";
+                  "aarch64-linux" = "arch-aarch64";
+                }.${system};
+              in ''
                 runHook preBuild
 
                 # Phase 1: Build eBPF object
                 pushd bpftop-ebpf
-                cargo build --target bpfel-unknown-none -Z build-std=core --release
+                cargo build --target bpfel-unknown-none -Z build-std=core --release --features ${archFeature}
                 popd
 
                 # Phase 2: Build userspace (embeds eBPF via include_bytes_aligned!)

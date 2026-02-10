@@ -53,9 +53,9 @@ Without the NixOS module you need sudo (or manually `setcap cap_bpf,cap_perfmon,
 Grab the static binary from the releases or build it yourself. You need nightly rust, `rust-src`, and `bpf-linker`.
 
 ```bash
-# build the eBPF object first
+# build the eBPF object first (use arch-aarch64 on arm64)
 cd bpftop-ebpf
-cargo build --target bpfel-unknown-none -Z build-std=core --release
+cargo build --target bpfel-unknown-none -Z build-std=core --release --features arch-x86_64
 cd ..
 
 # then the userspace binary
@@ -86,7 +86,7 @@ bpftop -u jrestivo         # filter by user
 ```bash
 nix develop
 # bpf-linker is installed via cargo install bpf-linker in the devshell
-cd bpftop-ebpf && cargo build --target bpfel-unknown-none -Z build-std=core --release && cd ..
+cd bpftop-ebpf && cargo build --target bpfel-unknown-none -Z build-std=core --release --features arch-x86_64 && cd ..
 cargo build --release --bin bpftop
 sudo ./target/release/bpftop
 ```
@@ -96,6 +96,12 @@ sudo ./target/release/bpftop
 The build is two-phase. Phase 1 compiles the eBPF program (`bpftop-ebpf`) for the `bpfel-unknown-none` target using `-Z build-std=core`. Phase 2 compiles the userspace binary which embeds the eBPF object at compile time via `include_bytes_aligned!`. The eBPF crate is excluded from the cargo workspace because it targets a completely different architecture.
 
 The nix package builds bpf-linker v0.10.1 from source against LLVM 22 to match the nightly rust toolchain's LLVM version. nixpkgs ships bpf-linker 0.9.15 with LLVM 21 which can't read object files produced by the newer LLVM.
+
+# Limitations
+
+Kernel struct field offsets (e.g. `task_struct`, `mm_struct`) are hardcoded per architecture at compile time. This means the eBPF program must be built with the correct `--features arch-x86_64` or `--features arch-aarch64` flag, and may break across kernel versions if struct layouts change.
+
+Ideally we'd use CO-RE (Compile Once, Run Everywhere) to resolve offsets at load time from the target kernel's BTF. Aya's loader fully supports CO-RE relocations, but aya-ebpf (the BPF-side Rust SDK) can't emit them because rustc doesn't expose LLVM's `__builtin_preserve_access_index` intrinsic. This is tracked at https://github.com/aya-rs/aya/issues/349.
 
 # Acknowledgements
 
