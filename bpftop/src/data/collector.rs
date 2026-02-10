@@ -46,6 +46,20 @@ impl Collector {
         }
     }
 
+    /// Create a no-op collector that will never be called.
+    /// Used as a placeholder after extracting the real collector for the background thread.
+    pub fn noop() -> Self {
+        Self {
+            ebpf: EbpfLoader::noop(),
+            container_resolver: ContainerResolver::new(),
+            prev_cpu_total: CpuStats::default(),
+            prev_cpus: Vec::new(),
+            prev_proc_times: HashMap::new(),
+            page_size: 4096,
+            clock_ticks: 100,
+        }
+    }
+
     /// Collect all system and process data for one refresh cycle.
     pub fn collect(&mut self) -> Result<(SystemInfo, Vec<ProcessInfo>)> {
         // Collect system-wide stats
@@ -135,6 +149,7 @@ impl Collector {
                 is_thread: false,
                 tid: *pid,
                 tagged: false,
+                tree_prefix: String::new(),
             });
         }
 

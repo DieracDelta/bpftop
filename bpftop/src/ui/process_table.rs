@@ -165,10 +165,11 @@ impl<'a> ProcessTableWidget<'a> {
                 format!("{:>w$}", t)
             }
             SortColumn::Command => {
-                if w > 0 && proc.cmdline.len() > w {
-                    proc.cmdline[..w].to_string()
+                let display = format!("{}{}", proc.tree_prefix, proc.cmdline);
+                if w > 0 && display.len() > w {
+                    display[..w].to_string()
                 } else {
-                    proc.cmdline.clone()
+                    display
                 }
             }
         }

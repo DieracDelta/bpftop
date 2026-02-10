@@ -33,6 +33,8 @@ pub struct ProcessInfo {
     pub tid: u32,
     /// Tagged by user (space key).
     pub tagged: bool,
+    /// Tree view prefix (e.g. "├─- ") set during tree ordering.
+    pub tree_prefix: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -87,6 +89,26 @@ impl ProcessState {
             Self::Idle => 'I',
             Self::Unknown => '?',
         }
+    }
+}
+
+impl ProcessInfo {
+    /// Update only volatile fields from a fresh snapshot, preserving stable
+    /// fields like `tagged`, `tree_prefix`, and ordering position.
+    pub fn update_dynamic_fields(&mut self, src: &ProcessInfo) {
+        self.state = src.state;
+        self.priority = src.priority;
+        self.nice = src.nice;
+        self.virt_bytes = src.virt_bytes;
+        self.res_bytes = src.res_bytes;
+        self.shr_bytes = src.shr_bytes;
+        self.cpu_percent = src.cpu_percent;
+        self.mem_percent = src.mem_percent;
+        self.cpu_time_secs = src.cpu_time_secs;
+        self.comm = src.comm.clone();
+        self.cmdline = src.cmdline.clone();
+        self.children = src.children.clone();
+        self.prev_cpu_ns = src.prev_cpu_ns;
     }
 }
 
@@ -257,6 +279,7 @@ mod tests {
             is_thread: false,
             tid: pid,
             tagged: false,
+            tree_prefix: String::new(),
         }
     }
 

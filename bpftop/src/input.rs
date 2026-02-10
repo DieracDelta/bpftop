@@ -39,8 +39,7 @@ fn handle_normal_key(app: &mut App, key: KeyEvent) -> bool {
     if let Some(pending) = app.pending_key.take() {
         match (pending, key.code) {
             ('g', KeyCode::Char('g')) => {
-                app.sort_cooldown = 5;
-                app.push_jump_mark();
+                               app.push_jump_mark();
                 app.select_first();
                 return false;
             }
@@ -74,7 +73,11 @@ fn handle_normal_key(app: &mut App, key: KeyEvent) -> bool {
         }
 
         // Tree view
-        KeyCode::F(5) | KeyCode::Char('t') => app.tree_view = !app.tree_view,
+        KeyCode::F(5) | KeyCode::Char('t') => {
+            app.tree_view = !app.tree_view;
+
+            app.update_filtered_processes();
+        }
 
         // Sort column select
         KeyCode::F(6) | KeyCode::Char('>') | KeyCode::Char('<') => {
@@ -90,16 +93,16 @@ fn handle_normal_key(app: &mut App, key: KeyEvent) -> bool {
         }
 
         // Navigation (vi-style j/k + arrows)
-        KeyCode::Up | KeyCode::Char('k') => { app.sort_cooldown = 5; app.move_selection(-1); }
-        KeyCode::Down | KeyCode::Char('j') => { app.sort_cooldown = 5; app.move_selection(1); }
-        KeyCode::Home => { app.sort_cooldown = 5; app.push_jump_mark(); app.select_first(); }
-        KeyCode::End => { app.sort_cooldown = 5; app.push_jump_mark(); app.select_last(); }
-        KeyCode::PageUp => { app.sort_cooldown = 5; app.push_jump_mark(); app.move_selection(-(app.visible_rows as i32)); }
-        KeyCode::PageDown => { app.sort_cooldown = 5; app.push_jump_mark(); app.move_selection(app.visible_rows as i32); }
+        KeyCode::Up | KeyCode::Char('k') => { app.move_selection(-1); }
+        KeyCode::Down | KeyCode::Char('j') => { app.move_selection(1); }
+        KeyCode::Home => { app.push_jump_mark(); app.select_first(); }
+        KeyCode::End => { app.push_jump_mark(); app.select_last(); }
+        KeyCode::PageUp => { app.push_jump_mark(); app.move_selection(-(app.visible_rows as i32)); }
+        KeyCode::PageDown => { app.push_jump_mark(); app.move_selection(app.visible_rows as i32); }
 
         // gg / G vim motions
         KeyCode::Char('g') => app.pending_key = Some('g'),
-        KeyCode::Char('G') => { app.sort_cooldown = 5; app.push_jump_mark(); app.select_last(); }
+        KeyCode::Char('G') => { app.push_jump_mark(); app.select_last(); }
 
         // Jump forward (Tab = Ctrl+I in terminals)
         KeyCode::Tab => app.jump_forward(),
@@ -117,23 +120,53 @@ fn handle_normal_key(app: &mut App, key: KeyEvent) -> bool {
         KeyCode::Char('u') => app.cycle_user_filter(),
 
         // Toggle threads
-        KeyCode::Char('H') => app.show_threads = !app.show_threads,
-        KeyCode::Char('K') => app.show_kernel_threads = !app.show_kernel_threads,
+        KeyCode::Char('H') => {
+            app.show_threads = !app.show_threads;
+
+            app.update_filtered_processes();
+        }
+        KeyCode::Char('K') => {
+            app.show_kernel_threads = !app.show_kernel_threads;
+
+            app.update_filtered_processes();
+        }
 
         // Quick sort
         KeyCode::Char('P') => {
             app.sort_column = SortColumn::CpuPercent;
             app.sort_ascending = false;
+
+            app.update_filtered_processes();
         }
         KeyCode::Char('M') => {
             app.sort_column = SortColumn::MemPercent;
             app.sort_ascending = false;
+
+            app.update_filtered_processes();
         }
         KeyCode::Char('T') => {
             app.sort_column = SortColumn::Time;
             app.sort_ascending = false;
+
+            app.update_filtered_processes();
         }
-        KeyCode::Char('I') => app.sort_ascending = !app.sort_ascending,
+        KeyCode::Char('I') => {
+            app.sort_ascending = !app.sort_ascending;
+
+            app.update_filtered_processes();
+        }
+
+        // Tree collapse/expand
+        KeyCode::Char('+') | KeyCode::Char('=') => {
+            if app.tree_view {
+                app.expand_tree_node();
+            }
+        }
+        KeyCode::Char('-') => {
+            if app.tree_view {
+                app.collapse_tree_node();
+            }
+        }
 
         _ => {}
     }
@@ -146,8 +179,7 @@ fn handle_visual_key(app: &mut App, key: KeyEvent) -> bool {
     if let Some(pending) = app.pending_key.take() {
         match (pending, key.code) {
             ('g', KeyCode::Char('g')) => {
-                app.sort_cooldown = 5;
-                app.select_first();
+                               app.select_first();
                 return false;
             }
             _ => { /* cancel pending, fall through */ }
@@ -159,12 +191,12 @@ fn handle_visual_key(app: &mut App, key: KeyEvent) -> bool {
             app.visual_anchor = None;
             app.mode = AppMode::Normal;
         }
-        KeyCode::Up | KeyCode::Char('k') => { app.sort_cooldown = 5; app.move_selection(-1); }
-        KeyCode::Down | KeyCode::Char('j') => { app.sort_cooldown = 5; app.move_selection(1); }
+        KeyCode::Up | KeyCode::Char('k') => { app.move_selection(-1); }
+        KeyCode::Down | KeyCode::Char('j') => { app.move_selection(1); }
         KeyCode::Char('g') => app.pending_key = Some('g'),
-        KeyCode::Char('G') => { app.sort_cooldown = 5; app.select_last(); }
-        KeyCode::PageUp => { app.sort_cooldown = 5; app.move_selection(-(app.visible_rows as i32)); }
-        KeyCode::PageDown => { app.sort_cooldown = 5; app.move_selection(app.visible_rows as i32); }
+        KeyCode::Char('G') => { app.select_last(); }
+        KeyCode::PageUp => { app.move_selection(-(app.visible_rows as i32)); }
+        KeyCode::PageDown => { app.move_selection(app.visible_rows as i32); }
 
         // Space: tag the visual range and exit visual mode
         KeyCode::Char(' ') => {
@@ -192,19 +224,27 @@ fn handle_filter_key(app: &mut App, key: KeyEvent, _mode: FilterMode) -> bool {
             app.mode = AppMode::Normal;
             app.filter_query.clear();
             app.active_filter.clear();
+
+            app.update_filtered_processes();
         }
         KeyCode::Enter => {
             app.push_jump_mark();
             app.active_filter = app.filter_query.clone();
             app.mode = AppMode::Normal;
+
+            app.update_filtered_processes();
         }
         KeyCode::Backspace => {
             app.filter_query.pop();
             app.active_filter = app.filter_query.clone();
+
+            app.update_filtered_processes();
         }
         KeyCode::Char(c) => {
             app.filter_query.push(c);
             app.active_filter = app.filter_query.clone();
+
+            app.update_filtered_processes();
         }
         _ => {}
     }
@@ -254,6 +294,8 @@ fn handle_sort_key(app: &mut App, key: KeyEvent) -> bool {
             if let Some(pos) = cols.iter().position(|c| *c == app.sort_column) {
                 if pos > 0 {
                     app.sort_column = cols[pos - 1];
+        
+                    app.update_filtered_processes();
                 }
             }
         }
@@ -262,6 +304,8 @@ fn handle_sort_key(app: &mut App, key: KeyEvent) -> bool {
             if let Some(pos) = cols.iter().position(|c| *c == app.sort_column) {
                 if pos < cols.len() - 1 {
                     app.sort_column = cols[pos + 1];
+        
+                    app.update_filtered_processes();
                 }
             }
         }

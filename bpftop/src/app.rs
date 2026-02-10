@@ -1,5 +1,7 @@
+use std::collections::{HashMap, HashSet};
 use std::io;
-use std::time::{Duration, Instant};
+use std::sync::mpsc;
+use std::time::Duration;
 
 use anyhow::Result;
 use crossterm::event::{self, DisableMouseCapture, EnableMouseCapture};
@@ -54,12 +56,14 @@ pub struct App {
     pub visible_rows: usize,
     pub sort_column: SortColumn,
     pub sort_ascending: bool,
-    pub sort_cooldown: u8,
 
     // View toggles
     pub tree_view: bool,
     pub show_threads: bool,
     pub show_kernel_threads: bool,
+
+    // Tree collapse/expand
+    pub collapsed_pids: HashSet<u32>,
 
     // Filter/search
     pub filter_query: String,
@@ -81,6 +85,9 @@ pub struct App {
 
     // Dynamic header height (set during draw)
     pub header_height: u16,
+
+    // Redraw control
+    pub dirty: bool,
 
     // Data collection
     collector: Collector,
@@ -106,12 +113,12 @@ impl App {
             selected: 0,
             scroll_offset: 0,
             visible_rows: 0,
-            sort_column: SortColumn::CpuPercent,
-            sort_ascending: false,
-            sort_cooldown: 0,
+            sort_column: SortColumn::Pid,
+            sort_ascending: true,
             tree_view,
             show_threads,
             show_kernel_threads,
+            collapsed_pids: HashSet::new(),
             filter_query: String::new(),
             active_filter: String::new(),
             user_filter: None,
@@ -121,6 +128,7 @@ impl App {
             jump_pos: 0,
             visual_anchor: None,
             header_height: 4,
+            dirty: true,
             collector,
             ebpf_loaded,
         }
@@ -136,33 +144,62 @@ impl App {
         let mut terminal = Terminal::new(backend)?;
 
         let tick_rate = Duration::from_millis(self.config.general.refresh_rate_ms);
-        let mut last_tick = Instant::now();
 
-        // Initial data collection
-        self.refresh_data();
+        // Move collector to background thread
+        let (data_tx, data_rx) = mpsc::channel();
+        let (shutdown_tx, shutdown_rx) = mpsc::channel::<()>();
+        let mut collector = std::mem::replace(&mut self.collector, Collector::noop());
+
+        // Initial collect on main thread so first frame has data
+        if let Ok(data) = collector.collect() {
+            self.merge_data(data.0, data.1);
+        }
+
+        let tick_rate_clone = tick_rate;
+        std::thread::spawn(move || {
+            loop {
+                std::thread::sleep(tick_rate_clone);
+                match collector.collect() {
+                    Ok(data) => {
+                        if data_tx.send(data).is_err() {
+                            break;
+                        }
+                    }
+                    Err(e) => log::error!("Collection error: {e}"),
+                }
+                if shutdown_rx.try_recv().is_ok() {
+                    break;
+                }
+            }
+        });
+
+        // Short poll timeout so UI stays responsive
+        let poll_timeout = Duration::from_millis(50);
 
         loop {
-            // Draw
-            terminal.draw(|frame| self.draw(frame))?;
+            // Drain any available data (use freshest)
+            while let Ok((sys_info, processes)) = data_rx.try_recv() {
+                self.merge_data(sys_info, processes);
+            }
 
-            // Handle events with timeout
-            let timeout = tick_rate
-                .checked_sub(last_tick.elapsed())
-                .unwrap_or_else(|| Duration::from_secs(0));
+            // Only redraw when something changed
+            if self.dirty {
+                terminal.draw(|frame| self.draw(frame))?;
+                self.dirty = false;
+            }
 
-            if event::poll(timeout)? {
+            // Handle events with short timeout
+            if event::poll(poll_timeout)? {
                 let evt = event::read()?;
                 if input::handle_event(self, evt) {
                     break;
                 }
-            }
-
-            // Tick-based refresh
-            if last_tick.elapsed() >= tick_rate {
-                self.refresh_data();
-                last_tick = Instant::now();
+                self.dirty = true;
             }
         }
+
+        // Signal the background thread to exit
+        drop(shutdown_tx);
 
         // Restore terminal
         disable_raw_mode()?;
@@ -254,20 +291,49 @@ impl App {
         }
     }
 
-    fn refresh_data(&mut self) {
-        match self.collector.collect() {
-            Ok((sys_info, processes)) => {
-                self.sys_info = sys_info;
-                self.all_processes = processes;
-                self.update_filtered_processes();
+    fn merge_data(&mut self, sys_info: SystemInfo, processes: Vec<ProcessInfo>) {
+        self.sys_info = sys_info;
+
+        let new_map: HashMap<u32, ProcessInfo> =
+            processes.into_iter().map(|p| (p.pid, p)).collect();
+        let old_pids: HashSet<u32> = self.all_processes.iter().map(|p| p.pid).collect();
+        let new_pids: HashSet<u32> = new_map.keys().copied().collect();
+        let structure_changed = old_pids != new_pids;
+
+        if structure_changed {
+            // PIDs appeared or disappeared — full rebuild required
+            let tagged_pids: HashSet<u32> = self
+                .all_processes
+                .iter()
+                .chain(self.filtered_processes.iter())
+                .filter(|p| p.tagged)
+                .map(|p| p.pid)
+                .collect();
+
+            self.all_processes = new_map.into_values().collect();
+            for p in &mut self.all_processes {
+                if tagged_pids.contains(&p.pid) {
+                    p.tagged = true;
+                }
             }
-            Err(e) => {
-                log::error!("Data collection error: {e}");
+            self.update_filtered_processes();
+        } else {
+            // Same PIDs — update values in-place, no re-sort, no tree rebuild
+            for p in &mut self.all_processes {
+                if let Some(np) = new_map.get(&p.pid) {
+                    p.update_dynamic_fields(np);
+                }
+            }
+            for p in &mut self.filtered_processes {
+                if let Some(np) = new_map.get(&p.pid) {
+                    p.update_dynamic_fields(np);
+                }
             }
         }
+        self.dirty = true;
     }
 
-    fn update_filtered_processes(&mut self) {
+    pub fn update_filtered_processes(&mut self) {
         let mut procs: Vec<ProcessInfo> = self
             .all_processes
             .iter()
@@ -292,43 +358,29 @@ impl App {
             .cloned()
             .collect();
 
-        // Sort (skip while cooldown is active to avoid shuffling during navigation)
-        if self.sort_cooldown > 0 {
-            self.sort_cooldown -= 1;
-        } else if self.tree_view {
-            // In tree view, build tree and reorder
-            let tree = tree_view::build_tree(&procs);
+        if self.tree_view {
+            let tree = tree_view::build_tree(&procs, &self.collapsed_pids);
             procs = tree_view::tree_ordered_processes(&procs, &tree);
         } else {
             procs.sort_by(|a, b| compare_processes(a, b, self.sort_column, self.sort_ascending));
         }
 
-        // Remember screen row before update
-        let screen_row = self.selected.saturating_sub(self.scroll_offset);
-        let selected_pid = self
-            .filtered_processes
-            .get(self.selected)
-            .map(|p| p.pid);
-
         self.filtered_processes = procs;
 
-        // Find PID's new position
-        if let Some(pid) = selected_pid {
-            if let Some(pos) = self.filtered_processes.iter().position(|p| p.pid == pid) {
-                self.selected = pos;
-            }
-        }
-
-        // Clamp selection
+        // Keep cursor at same visual position, just clamp to new bounds
         if !self.filtered_processes.is_empty() {
             self.selected = self.selected.min(self.filtered_processes.len() - 1);
         } else {
             self.selected = 0;
         }
 
-        // Restore scroll so PID stays at the same screen row
-        let max_offset = self.filtered_processes.len().saturating_sub(1);
-        self.scroll_offset = self.selected.saturating_sub(screen_row).min(max_offset);
+        // Clamp scroll offset
+        let max_offset = if self.visible_rows > 0 {
+            self.filtered_processes.len().saturating_sub(self.visible_rows)
+        } else {
+            self.filtered_processes.len().saturating_sub(1)
+        };
+        self.scroll_offset = self.scroll_offset.min(max_offset);
     }
 
     pub fn move_selection(&mut self, delta: i32) {
@@ -417,7 +469,6 @@ impl App {
     fn navigate_to_jump_pid(&mut self) {
         if let Some(&pid) = self.jump_list.get(self.jump_pos) {
             if let Some(pos) = self.filtered_processes.iter().position(|p| p.pid == pid) {
-                self.sort_cooldown = 5;
                 self.selected = pos;
                 self.adjust_scroll();
             }
@@ -445,6 +496,22 @@ impl App {
                         ap.tagged = true;
                     }
                 }
+            }
+        }
+    }
+
+    pub fn expand_tree_node(&mut self) {
+        if let Some(proc) = self.filtered_processes.get(self.selected) {
+            self.collapsed_pids.remove(&proc.pid);
+            self.update_filtered_processes();
+        }
+    }
+
+    pub fn collapse_tree_node(&mut self) {
+        if let Some(proc) = self.filtered_processes.get(self.selected) {
+            if !proc.children.is_empty() {
+                self.collapsed_pids.insert(proc.pid);
+                self.update_filtered_processes();
             }
         }
     }

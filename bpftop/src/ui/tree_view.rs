@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::data::process::ProcessInfo;
 
@@ -9,11 +9,14 @@ pub struct TreeEntry {
     pub depth: u16,
     pub prefix: String, // e.g., "├─" or "└─"
     pub is_last: bool,
+    pub has_children: bool,
+    pub collapsed: bool,
 }
 
 /// Build a flat list of tree entries from the process list.
 /// The tree is rooted at init (pid 1) or the earliest ancestor.
-pub fn build_tree(processes: &[ProcessInfo]) -> Vec<TreeEntry> {
+/// Collapsed PIDs have their children omitted from the output.
+pub fn build_tree(processes: &[ProcessInfo], collapsed: &HashSet<u32>) -> Vec<TreeEntry> {
     let proc_map: HashMap<u32, &ProcessInfo> = processes.iter().map(|p| (p.pid, p)).collect();
 
     // Find root processes (ppid == 0 or ppid not in our process list)
@@ -48,6 +51,7 @@ pub fn build_tree(processes: &[ProcessInfo]) -> Vec<TreeEntry> {
             is_last,
             String::new(),
             &children_map,
+            collapsed,
             &mut entries,
         );
     }
@@ -61,6 +65,7 @@ fn build_subtree(
     is_last: bool,
     indent_prefix: String,
     children_map: &HashMap<u32, Vec<u32>>,
+    collapsed: &HashSet<u32>,
     entries: &mut Vec<TreeEntry>,
 ) {
     let prefix = if depth == 0 {
@@ -71,12 +76,24 @@ fn build_subtree(
         format!("{indent_prefix}\u{251c}\u{2500}") // ├─
     };
 
+    let has_children = children_map
+        .get(&pid)
+        .map_or(false, |c| !c.is_empty());
+    let is_collapsed = collapsed.contains(&pid);
+
     entries.push(TreeEntry {
         pid,
         depth,
         prefix,
         is_last,
+        has_children,
+        collapsed: is_collapsed,
     });
+
+    // Don't recurse into collapsed nodes
+    if is_collapsed {
+        return;
+    }
 
     if let Some(children) = children_map.get(&pid) {
         for (i, &child) in children.iter().enumerate() {
@@ -88,18 +105,29 @@ fn build_subtree(
             } else {
                 format!("{indent_prefix}\u{2502} ") // │
             };
-            build_subtree(child, depth + 1, child_is_last, child_indent, children_map, entries);
+            build_subtree(child, depth + 1, child_is_last, child_indent, children_map, collapsed, entries);
         }
     }
 }
 
-/// Reorder processes according to tree order, returning the reordered list.
+/// Reorder processes according to tree order, setting tree_prefix on each.
 pub fn tree_ordered_processes(
     processes: &[ProcessInfo],
     tree: &[TreeEntry],
 ) -> Vec<ProcessInfo> {
     let proc_map: HashMap<u32, &ProcessInfo> = processes.iter().map(|p| (p.pid, p)).collect();
     tree.iter()
-        .filter_map(|entry| proc_map.get(&entry.pid).map(|p| (*p).clone()))
+        .filter_map(|entry| {
+            proc_map.get(&entry.pid).map(|p| {
+                let mut proc = (*p).clone();
+                let indicator = if entry.has_children {
+                    if entry.collapsed { "+" } else { "-" }
+                } else {
+                    " "
+                };
+                proc.tree_prefix = format!("{}{} ", entry.prefix, indicator);
+                proc
+            })
+        })
         .collect()
 }

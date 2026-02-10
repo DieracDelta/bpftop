@@ -55,6 +55,7 @@ impl<'a> Widget for HelpDialog<'a> {
             ("M", "Sort by MEM%"),
             ("T", "Sort by TIME"),
             ("I", "Invert sort order"),
+            ("+ / -", "Expand/Collapse tree node"),
         ];
 
         let lines: Vec<Line> = bindings
