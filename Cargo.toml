@@ -1,0 +1,7 @@
+[workspace]
+members = ["bpftop", "bpftop-common", "xtask"]
+resolver = "2"
+
+[workspace.dependencies]
+anyhow = "1"
+log = "0.4"
