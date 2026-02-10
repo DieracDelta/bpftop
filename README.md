@@ -113,8 +113,16 @@ psc was also an inspiration for this project. I didn't realize bpf was this far 
 
 bpftop uses a BPF task iterator to walk the kernel's task list in a single pass, plus 4 constant `/proc` reads for system-wide stats (`/proc/stat`, `/proc/meminfo`, `/proc/loadavg`, `/proc/uptime`). htop opens and reads ~4 files per process per refresh (`/proc/PID/stat`, `status`, `cmdline`, `cgroup`), so its syscall count grows linearly with process count.
 
+**Syscall scaling** — At each process count (100–10,000), dummy `sleep` processes are spawned and both tools are run under `strace -f -c` to count total syscalls. htop scales linearly; bpftop stays flat.
+
 ![Syscall Scaling](bench/results/syscall_scaling.png)
+
+**Collection time** — Each tool is benchmarked with `hyperfine` at each scale point. bpftop runs `bench --iterations 1 --warmup 0` (one BPF iterator walk + 4 `/proc` reads). htop runs `htop -d 1 -n 5` under `script` for a pseudo-tty. Shaded bands show stddev.
+
 ![Collection Time](bench/results/collection_time.png)
+
+**Syscall breakdown at N=5000** — Per-syscall counts from `strace -f -c` showing htop dominated by `read`/`openat`/`close` (per-PID `/proc` scraping) while bpftop's counts are near zero on the log scale.
+
 ![Syscall Breakdown](bench/results/syscall_breakdown.png)
 
 ## Reproducing
