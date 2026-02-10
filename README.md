@@ -123,8 +123,8 @@ bpftop uses a BPF task iterator to walk the kernel's task list in a single pass,
 # Build the bench binary
 cargo build --release --bin bench
 
-# Enter the bench shell (provides hyperfine, strace, htop, matplotlib)
-nix-shell bench/shell.nix
+# Enter the devshell (provides hyperfine, strace, htop, matplotlib)
+nix develop
 
 # Run benchmarks (needs root for BPF)
 sudo bash bench/run.sh
