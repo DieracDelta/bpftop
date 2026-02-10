@@ -190,6 +190,11 @@
             # Build deps
             pkg-config
             elfutils
+            # Benchmarking
+            hyperfine
+            strace
+            htop
+            (python3.withPackages (ps: [ ps.matplotlib ps.numpy ]))
           ];
 
           LIBCLANG_PATH = "${pkgs.llvmPackages.libclang.lib}/lib";

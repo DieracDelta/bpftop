@@ -105,6 +105,32 @@ Ideally we'd use CO-RE (Compile Once, Run Everywhere) to resolve offsets at load
 
 # Acknowledgements
 
-htop was the inspiration for this project. It's too resource heavy! This is much faster (benchmarks coming soonTM)
+htop was the inspiration for this project. It's too resource heavy! bpftop is much faster — see the benchmarks below
 
 psc was also an inspiration for this project. I didn't realize bpf was this far along until I saw that project.
+
+# Performance
+
+bpftop uses a BPF task iterator to walk the kernel's task list in a single pass, plus 4 constant `/proc` reads for system-wide stats (`/proc/stat`, `/proc/meminfo`, `/proc/loadavg`, `/proc/uptime`). htop opens and reads ~4 files per process per refresh (`/proc/PID/stat`, `status`, `cmdline`, `cgroup`), so its syscall count grows linearly with process count.
+
+![Syscall Scaling](bench/results/syscall_scaling.png)
+![Collection Time](bench/results/collection_time.png)
+![Syscall Breakdown](bench/results/syscall_breakdown.png)
+
+## Reproducing
+
+```bash
+# Build the bench binary
+cargo build --release --bin bench
+
+# Enter the bench shell (provides hyperfine, strace, htop, matplotlib)
+nix-shell bench/shell.nix
+
+# Run benchmarks (needs root for BPF)
+sudo bash bench/run.sh
+
+# Generate graphs
+python3 bench/plot.py
+```
+
+See `bench/` for the full methodology. Timing uses [hyperfine](https://github.com/sharkdp/hyperfine) for statistically rigorous measurements. Syscall counts use `strace -c`.

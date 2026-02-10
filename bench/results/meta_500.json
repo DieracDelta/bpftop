@@ -1,0 +1,7 @@
+{
+    "scale": 500,
+    "actual_procs": 2280,
+    "hyperfine_runs": 20,
+    "htop_refreshes": 5,
+    "timestamp": "2026-02-10T17:55:49-05:00"
+}
