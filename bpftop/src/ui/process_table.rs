@@ -16,6 +16,7 @@ pub struct ProcessTableWidget<'a> {
     pub theme: &'a Theme,
     pub show_container: bool,
     pub visual_range: Option<(usize, usize)>,
+    pub error_message: Option<&'a str>,
 }
 
 impl<'a> Widget for ProcessTableWidget<'a> {
@@ -37,6 +38,26 @@ impl<'a> Widget for ProcessTableWidget<'a> {
             height: area.height.saturating_sub(1),
             ..area
         };
+
+        // Show error message if BPF failed and there are no processes
+        if self.processes.is_empty() {
+            if let Some(msg) = self.error_message {
+                let err_style = Style::default()
+                    .fg(self.theme.proc_zombie)
+                    .add_modifier(Modifier::BOLD);
+                let normal_style = Style::default().fg(self.theme.fg);
+                let mut y = rows_area.y + 1;
+                for line in msg.lines() {
+                    if y >= rows_area.y + rows_area.height {
+                        break;
+                    }
+                    let style = if y == rows_area.y + 1 { err_style } else { normal_style };
+                    buf.set_string(rows_area.x + 2, y, line, style);
+                    y += 1;
+                }
+                return;
+            }
+        }
 
         let visible_rows = rows_area.height as usize;
         let end = (self.scroll_offset + visible_rows).min(self.processes.len());
@@ -164,6 +185,14 @@ impl<'a> ProcessTableWidget<'a> {
                 let t = format_time(proc.cpu_time_secs);
                 format!("{:>w$}", t)
             }
+            SortColumn::Container => {
+                let name = proc.container.as_deref().unwrap_or("-");
+                if name.len() > w {
+                    name[..w].to_string()
+                } else {
+                    format!("{:<w$}", name)
+                }
+            }
             SortColumn::Command => {
                 let display = format!("{}{}", proc.tree_prefix, proc.cmdline);
                 if w > 0 && display.len() > w {
@@ -178,15 +207,13 @@ impl<'a> ProcessTableWidget<'a> {
     fn column_layout(&self, total_width: u16) -> Vec<(SortColumn, u16)> {
         let mut cols: Vec<(SortColumn, u16)> = SortColumn::all()
             .iter()
+            .filter(|c| **c != SortColumn::Container || self.show_container)
             .map(|c| (*c, c.width()))
             .collect();
 
-        // If showing container column, account for it in available width
-        let container_overhead = if self.show_container { 13 } else { 0 }; // "CONT" column + separator
-
         // Calculate remaining width for Command column
         let fixed_width: u16 = cols.iter().filter(|(c, _)| *c != SortColumn::Command).map(|(_, w)| w + 1).sum();
-        let cmd_width = total_width.saturating_sub(fixed_width + container_overhead);
+        let cmd_width = total_width.saturating_sub(fixed_width);
         if let Some(entry) = cols.iter_mut().find(|(c, _)| *c == SortColumn::Command) {
             entry.1 = cmd_width;
         }

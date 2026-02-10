@@ -126,6 +126,7 @@ pub enum SortColumn {
     CpuPercent,
     MemPercent,
     Time,
+    Container,
     Command,
 }
 
@@ -143,6 +144,7 @@ impl SortColumn {
             Self::CpuPercent,
             Self::MemPercent,
             Self::Time,
+            Self::Container,
             Self::Command,
         ]
     }
@@ -160,6 +162,7 @@ impl SortColumn {
             Self::CpuPercent => "CPU%",
             Self::MemPercent => "MEM%",
             Self::Time => "TIME+",
+            Self::Container => "CONT",
             Self::Command => "Command",
         }
     }
@@ -178,6 +181,7 @@ impl SortColumn {
             Self::CpuPercent => 6,
             Self::MemPercent => 6,
             Self::Time => 10,
+            Self::Container => 12,
             Self::Command => 0, // fills remaining space
         }
     }
@@ -205,6 +209,7 @@ pub fn compare_processes(a: &ProcessInfo, b: &ProcessInfo, col: SortColumn, asce
         SortColumn::CpuPercent => quantize(a.cpu_percent).cmp(&quantize(b.cpu_percent)).then(a.pid.cmp(&b.pid)),
         SortColumn::MemPercent => quantize(a.mem_percent).cmp(&quantize(b.mem_percent)).then(a.pid.cmp(&b.pid)),
         SortColumn::Time => quantize(a.cpu_time_secs).cmp(&quantize(b.cpu_time_secs)).then(a.pid.cmp(&b.pid)),
+        SortColumn::Container => a.container.cmp(&b.container).then(a.pid.cmp(&b.pid)),
         SortColumn::Command => a.cmdline.cmp(&b.cmdline).then(a.pid.cmp(&b.pid)),
     };
     if ascending { ord } else { ord.reverse() }

@@ -48,9 +48,21 @@ fn handle_normal_key(app: &mut App, key: KeyEvent) -> bool {
     }
 
     // Ctrl+O = jump back, Tab = jump forward (Ctrl+I = Tab in terminals)
-    if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('o') {
-        app.jump_back();
-        return false;
+    if key.modifiers.contains(KeyModifiers::CONTROL) {
+        match key.code {
+            KeyCode::Char('o') => { app.jump_back(); return false; }
+            KeyCode::Char('u') => {
+                app.push_jump_mark();
+                app.move_selection(-((app.visible_rows / 2) as i32));
+                return false;
+            }
+            KeyCode::Char('d') => {
+                app.push_jump_mark();
+                app.move_selection((app.visible_rows / 2) as i32);
+                return false;
+            }
+            _ => {}
+        }
     }
 
     match key.code {

@@ -93,6 +93,7 @@ pub struct App {
     // Data collection
     collector: Collector,
     ebpf_loaded: bool,
+    pub ebpf_error: Option<String>,
 }
 
 impl App {
@@ -101,14 +102,19 @@ impl App {
         let tree_view = config.general.tree_view;
         let show_threads = config.general.show_threads;
         let show_kernel_threads = config.general.show_kernel_threads;
-        let ebpf = match EbpfLoader::load() {
+        let (ebpf, ebpf_error) = match EbpfLoader::load() {
             Ok(loader) => {
                 log::info!("eBPF programs loaded successfully");
-                loader
+                (loader, None)
             }
             Err(e) => {
                 log::warn!("eBPF not available: {e}");
-                EbpfLoader::noop()
+                let msg = format!(
+                    "eBPF failed to load: {e:#}\n\n\
+                     Run as root (sudo bpftop) or use the NixOS wrapper:\n\
+                     programs.bpftop.enable = true  ->  /run/wrappers/bin/bpftop"
+                );
+                (EbpfLoader::noop(), Some(msg))
             }
         };
         let ebpf_loaded = ebpf.is_loaded();
@@ -142,6 +148,7 @@ impl App {
             dirty: true,
             collector,
             ebpf_loaded,
+            ebpf_error,
         }
     }
 
@@ -258,6 +265,7 @@ impl App {
             theme: &self.theme,
             show_container: has_container,
             visual_range: self.visual_range(),
+            error_message: self.ebpf_error.as_deref(),
         };
         frame.render_widget(table, table_area);
 
