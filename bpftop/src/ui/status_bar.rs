@@ -29,14 +29,13 @@ impl<'a> Widget for StatusBarWidget<'a> {
         let label_style = bg_style;
 
         let keys = [
-            ("F1", "Help"),
-            ("F2", "Setup"),
-            ("F3", "Search"),
-            ("F4", "Filter"),
-            ("F5", "Tree"),
-            ("F6", "Sort"),
-            ("F9", "Kill"),
-            ("F10", "Quit"),
+            ("?", "Help"),
+            ("/", "Search"),
+            ("\\", "Filter"),
+            ("t", "Tree"),
+            ("><", "Sort"),
+            ("x", "Kill"),
+            ("q", "Quit"),
         ];
 
         let mut spans = Vec::new();

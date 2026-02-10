@@ -84,8 +84,8 @@ fn handle_normal_key(app: &mut App, key: KeyEvent) -> bool {
             app.mode = AppMode::SortSelect;
         }
 
-        // Kill (F9 only - 'k' is reserved for vi-nav)
-        KeyCode::F(9) => {
+        // Kill (F9 or x)
+        KeyCode::F(9) | KeyCode::Char('x') => {
             if !app.filtered_processes.is_empty() {
                 app.kill_signal_idx = 0;
                 app.mode = AppMode::Kill;
