@@ -2,6 +2,8 @@
 
 An eBPF-powered interactive process monitor. Think `top` but using BPF iterators and perf events to get per-process stats with minimal overhead. TUI built with ratatui.
 
+![demo](demo.gif)
+
 # Disclaimer
 
 I worked with claude when writing this. Claude has touched many parts of this codebase.

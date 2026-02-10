@@ -195,6 +195,9 @@
             strace
             htop
             (python3.withPackages (ps: [ ps.matplotlib ps.numpy ]))
+            # Demo recording
+            asciinema
+            agg
           ];
 
           LIBCLANG_PATH = "${pkgs.llvmPackages.libclang.lib}/lib";
