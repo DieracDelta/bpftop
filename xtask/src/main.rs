@@ -38,25 +38,31 @@ fn main() -> Result<()> {
     }
 }
 
-fn build_ebpf(target: &str, release: bool) -> Result<()> {
+fn build_ebpf(target: &str, _release: bool) -> Result<()> {
     let workspace_root = workspace_root();
     let ebpf_dir = workspace_root.join("bpftop-ebpf");
 
+    // eBPF programs MUST be built in release mode because debug builds
+    // include core::fmt code that exceeds BPF's function argument limit.
     let mut cmd = Command::new("cargo");
     cmd.current_dir(&ebpf_dir)
         .env_remove("RUSTUP_TOOLCHAIN")
         .args([
-            "+nightly",
             "build",
             "--target",
             target,
             "-Z",
             "build-std=core",
-        ]);
-
-    if release {
-        cmd.arg("--release");
-    }
+            "--release",
+        ])
+        .env(
+            "CARGO_ENCODED_RUSTFLAGS",
+            [
+                "-Cdebuginfo=2",
+                "-Clink-arg=--btf",
+            ]
+            .join("\x1f"),
+        );
 
     let status = cmd.status().context("failed to build eBPF programs")?;
     if !status.success() {

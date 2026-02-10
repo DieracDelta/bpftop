@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::fs;
-
-use anyhow::Result;
+use std::os::unix::fs::MetadataExt;
+use std::path::Path;
 
 /// Container runtime information for a process.
 #[derive(Debug, Clone)]
@@ -18,63 +18,104 @@ pub enum ContainerRuntime {
     Unknown,
 }
 
-/// Cache of cgroup path -> container name mappings.
-#[derive(Debug, Default)]
-pub struct ContainerResolver {
-    cache: HashMap<String, Option<ContainerInfo>>,
+/// Resolves cgroup inode IDs to container names.
+///
+/// BPF provides `cgroup_id` (the inode number of the cgroup directory
+/// in cgroupfs). We walk /sys/fs/cgroup/ to build a mapping from
+/// inode ID → cgroup path, then parse container info from the path.
+///
+/// No per-PID /proc reads are needed.
+pub struct CgroupResolver {
+    /// cgroup inode ID → cgroup path (e.g. "/system.slice/docker-abc.scope")
+    id_to_path: HashMap<u64, String>,
+    /// cgroup path → parsed container info (cache)
+    path_to_container: HashMap<String, Option<ContainerInfo>>,
+    /// Counter to trigger periodic refresh of the inode map.
+    cycles_since_refresh: u32,
 }
 
-impl ContainerResolver {
+impl CgroupResolver {
     pub fn new() -> Self {
-        Self {
-            cache: HashMap::new(),
+        let mut resolver = Self {
+            id_to_path: HashMap::new(),
+            path_to_container: HashMap::new(),
+            cycles_since_refresh: 0,
+        };
+        resolver.refresh_inode_map();
+        resolver
+    }
+
+    /// Call once per collect cycle to periodically refresh the cgroup inode map.
+    pub fn tick(&mut self) {
+        self.cycles_since_refresh += 1;
+        if self.cycles_since_refresh >= 10 {
+            self.refresh_inode_map();
+            self.cycles_since_refresh = 0;
         }
     }
 
-    /// Resolve the container name for a given PID by reading its cgroup.
-    pub fn resolve(&mut self, pid: u32) -> Option<ContainerInfo> {
-        let cgroup_path = read_cgroup(pid).unwrap_or_default();
-        if cgroup_path.is_empty() {
+    /// Resolve a cgroup inode ID (from BPF) to container info.
+    /// Returns None for non-container cgroups.
+    pub fn resolve(&mut self, cgroup_id: u64) -> Option<ContainerInfo> {
+        if cgroup_id == 0 {
             return None;
         }
 
-        if let Some(cached) = self.cache.get(&cgroup_path) {
+        let path = self.id_to_path.get(&cgroup_id)?;
+
+        if let Some(cached) = self.path_to_container.get(path) {
             return cached.clone();
         }
 
-        let info = parse_container_from_cgroup(&cgroup_path);
-        self.cache.insert(cgroup_path, info.clone());
+        let info = parse_container_from_cgroup(path);
+        self.path_to_container.insert(path.clone(), info.clone());
         info
     }
 
-    /// Clear the cache (call periodically to pick up new containers).
-    pub fn clear_cache(&mut self) {
-        self.cache.clear();
+    /// Also return the cgroup path string for a given cgroup_id.
+    pub fn resolve_path(&self, cgroup_id: u64) -> String {
+        self.id_to_path
+            .get(&cgroup_id)
+            .cloned()
+            .unwrap_or_default()
     }
-}
 
-/// Read the cgroup path for a PID from /proc/[pid]/cgroup.
-fn read_cgroup(pid: u32) -> Result<String> {
-    let content = fs::read_to_string(format!("/proc/{pid}/cgroup"))?;
-    // For cgroup v2, there's a single "0::/path" line.
-    // For cgroup v1, look for the "name=systemd" or first entry.
-    for line in content.lines() {
-        let parts: Vec<&str> = line.splitn(3, ':').collect();
-        if parts.len() == 3 {
-            // cgroup v2: hierarchy-ID = 0, controller = empty
-            if parts[0] == "0" {
-                return Ok(parts[2].to_string());
+    /// Walk /sys/fs/cgroup/ and map inode numbers to cgroup paths.
+    fn refresh_inode_map(&mut self) {
+        self.id_to_path.clear();
+        let base = Path::new("/sys/fs/cgroup");
+        if base.exists() {
+            self.walk_cgroup_tree(base, base);
+        }
+    }
+
+    fn walk_cgroup_tree(&mut self, dir: &Path, base: &Path) {
+        let entries = match fs::read_dir(dir) {
+            Ok(e) => e,
+            Err(_) => return,
+        };
+
+        // Record this directory's inode
+        if let Ok(meta) = fs::metadata(dir) {
+            let ino = meta.ino();
+            let relative = dir
+                .strip_prefix(base)
+                .map(|p| format!("/{}", p.display()))
+                .unwrap_or_else(|_| "/".to_string());
+            self.id_to_path.insert(ino, relative);
+        }
+
+        for entry in entries {
+            let entry = match entry {
+                Ok(e) => e,
+                Err(_) => continue,
+            };
+            let path = entry.path();
+            if path.is_dir() {
+                self.walk_cgroup_tree(&path, base);
             }
         }
     }
-    // Fallback: return the path from the first line
-    if let Some(line) = content.lines().next() {
-        let parts: Vec<&str> = line.splitn(3, ':').collect();
-        if parts.len() == 3 {
-            return Ok(parts[2].to_string());
-        }
-    }
-    Ok(String::new())
 }
 
 /// Parse container ID/name from a cgroup path.

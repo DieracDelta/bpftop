@@ -44,6 +44,11 @@
           ];
 
           LIBCLANG_PATH = "${pkgs.llvmPackages.libclang.lib}/lib";
+
+          shellHook = ''
+            # bpf-linker is installed via: cargo install bpf-linker
+            export PATH="$HOME/.cargo/bin:$PATH"
+          '';
         };
       });
     };

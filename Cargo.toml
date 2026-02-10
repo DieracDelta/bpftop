@@ -1,5 +1,6 @@
 [workspace]
 members = ["bpftop", "bpftop-common", "xtask"]
+exclude = ["bpftop-ebpf"]
 resolver = "2"
 
 [workspace.dependencies]

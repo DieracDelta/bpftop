@@ -1,55 +1,180 @@
-use std::collections::HashMap;
 use std::fs;
-use std::path::Path;
+use std::io::Read;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result};
+use aya::maps::HashMap as BpfHashMap;
+use aya::programs::iter::{Iter, IterLink};
+use aya::programs::TracePoint;
+use aya::{Btf, Ebpf};
+use bpftop_common::{CmdlineEvent, TaskInfo};
 
-/// Manages eBPF program loading.
+/// The compiled eBPF object. Built by xtask (cargo xtask build-ebpf)
+/// before the userspace crate is compiled.
 ///
-/// Note: BPF iterators (iter/task, iter/task_file) are not yet supported
-/// in aya 0.13. The eBPF programs are compiled and ready but will be
-/// activated when aya adds iterator support. Until then, we use /proc
-/// as the primary data source.
+/// Path is relative to this source file:
+///   loader.rs  ∈  bpftop/src/ebpf/
+///   workspace root = ../../../
+///   eBPF binary    = bpftop-ebpf/target/bpfel-unknown-none/release/bpftop-ebpf
+///
+/// NOTE: eBPF programs MUST be built in release mode because debug builds
+/// include core::fmt code that exceeds BPF's function argument limit.
+static BPF_OBJ: &[u8] =
+    aya::include_bytes_aligned!("../../../bpftop-ebpf/target/bpfel-unknown-none/release/bpftop-ebpf");
+
+/// Manages eBPF program loading, attachment, and data retrieval.
 pub struct EbpfLoader {
-    loaded: bool,
+    bpf: Option<Ebpf>,
 }
 
 impl EbpfLoader {
-    /// Try to load eBPF programs.
-    ///
-    /// Currently a no-op since aya 0.13 doesn't support BPF iterators.
-    /// Returns a loader that reports as not loaded, falling back to /proc.
+    /// Load and attach all eBPF programs (iterator + tracepoints).
     pub fn load() -> Result<Self> {
-        // BPF iterators require aya support for iter/task program type.
-        // Once available, this will:
-        // 1. Load the compiled eBPF binary
-        // 2. Attach the dump_task iterator
-        // 3. Read binary TaskInfo structs from the iterator output
-        Ok(Self { loaded: false })
+        let mut bpf = Ebpf::load(BPF_OBJ).context("loading eBPF object")?;
+        let btf = Btf::from_sys_fs().context("reading kernel BTF")?;
+
+        // Load the task iterator (attachment happens per-read)
+        let iter_prog: &mut Iter = bpf
+            .program_mut("dump_task")
+            .context("dump_task program not found")?
+            .try_into()
+            .context("dump_task is not an Iter program")?;
+        iter_prog
+            .load("task", &btf)
+            .context("loading dump_task iterator")?;
+
+        // Load and attach exec tracepoint
+        let exec_prog: &mut TracePoint = bpf
+            .program_mut("capture_cmdline")
+            .context("capture_cmdline program not found")?
+            .try_into()
+            .context("capture_cmdline is not a TracePoint")?;
+        exec_prog.load().context("loading capture_cmdline")?;
+        exec_prog
+            .attach("sched", "sched_process_exec")
+            .context("attaching capture_cmdline")?;
+
+        // Load and attach exit tracepoint
+        let exit_prog: &mut TracePoint = bpf
+            .program_mut("cleanup_cmdline")
+            .context("cleanup_cmdline program not found")?
+            .try_into()
+            .context("cleanup_cmdline is not a TracePoint")?;
+        exit_prog.load().context("loading cleanup_cmdline")?;
+        exit_prog
+            .attach("sched", "sched_process_exit")
+            .context("attaching cleanup_cmdline")?;
+
+        Ok(Self { bpf: Some(bpf) })
     }
 
-    /// Create a no-op loader for when eBPF is not available.
+    /// Create a no-op loader (used as placeholder after moving the real one).
     pub fn noop() -> Self {
-        Self { loaded: false }
+        Self { bpf: None }
     }
 
     pub fn is_loaded(&self) -> bool {
-        self.loaded
+        self.bpf.is_some()
+    }
+
+    /// Run the task iterator once, returning all TaskInfo structs.
+    ///
+    /// Each call creates a new iterator link, reads all output, and
+    /// drops the link. The iterator walks every task in the kernel.
+    pub fn read_tasks(&mut self) -> Result<Vec<TaskInfo>> {
+        let bpf = self
+            .bpf
+            .as_mut()
+            .context("eBPF not loaded")?;
+
+        let prog: &mut Iter = bpf
+            .program_mut("dump_task")
+            .context("dump_task program not found")?
+            .try_into()
+            .context("dump_task is not an Iter program")?;
+
+        let link_id = prog.attach().context("attaching dump_task iterator")?;
+        let link: IterLink = prog
+            .take_link(link_id)
+            .context("taking dump_task link")?;
+        let mut file = link.into_file().context("creating iterator file")?;
+
+        let mut buf = Vec::with_capacity(64 * 1024);
+        file.read_to_end(&mut buf)
+            .context("reading iterator output")?;
+
+        let task_size = std::mem::size_of::<TaskInfo>();
+        let tasks: Vec<TaskInfo> = buf
+            .chunks_exact(task_size)
+            .map(|chunk| unsafe { std::ptr::read_unaligned(chunk.as_ptr() as *const TaskInfo) })
+            .collect();
+
+        Ok(tasks)
+    }
+
+    /// Look up a cmdline for a PID from the BPF CMDLINE_MAP.
+    pub fn get_cmdline(&self, pid: u32) -> Option<String> {
+        let bpf = self.bpf.as_ref()?;
+        let map = bpf.map("CMDLINE_MAP")?;
+        let hash = BpfHashMap::<_, u32, CmdlineEvent>::try_from(map).ok()?;
+        let event = hash.get(&pid, 0).ok()?;
+
+        let len = (event.len as usize).min(event.cmdline.len());
+        let raw = &event.cmdline[..len];
+        // cmdline uses NUL as separator between args; replace with spaces
+        let s: String = raw
+            .iter()
+            .map(|&b| if b == 0 { ' ' } else { b as char })
+            .collect::<String>()
+            .trim()
+            .to_string();
+        if s.is_empty() {
+            None
+        } else {
+            Some(s)
+        }
+    }
+
+    /// Insert a cmdline entry into the BPF map (used for startup seeding).
+    pub fn seed_cmdline(&mut self, pid: u32, cmdline: &str) -> Result<()> {
+        let bpf = self
+            .bpf
+            .as_mut()
+            .context("eBPF not loaded")?;
+        let map = bpf
+            .map_mut("CMDLINE_MAP")
+            .context("CMDLINE_MAP not found")?;
+        let mut hash = BpfHashMap::<_, u32, CmdlineEvent>::try_from(map)
+            .map_err(|e| anyhow::anyhow!("CMDLINE_MAP is not a HashMap: {e}"))?;
+
+        let mut event = CmdlineEvent {
+            pid,
+            len: 0,
+            cmdline: [0u8; 256],
+        };
+        let bytes = cmdline.as_bytes();
+        let copy_len = bytes.len().min(255);
+        event.cmdline[..copy_len].copy_from_slice(&bytes[..copy_len]);
+        event.len = copy_len as u32;
+
+        hash.insert(pid, event, 0)
+            .context("inserting into CMDLINE_MAP")?;
+        Ok(())
     }
 }
 
-/// Read process info from /proc filesystem. This is the primary data
-/// source until BPF iterator support is available in aya.
-pub fn read_proc_tasks() -> Result<HashMap<u32, ProcTaskInfo>> {
-    let mut tasks = HashMap::new();
-
-    let entries = fs::read_dir("/proc").context("reading /proc")?;
+/// One-shot scan of /proc/*/cmdline to seed the CMDLINE_MAP for
+/// processes that were already running before the BPF tracepoints
+/// were attached. After this, no per-PID /proc reads occur.
+pub fn seed_cmdlines_from_proc(loader: &mut EbpfLoader) {
+    let entries = match fs::read_dir("/proc") {
+        Ok(e) => e,
+        Err(_) => return,
+    };
     for entry in entries {
         let entry = match entry {
             Ok(e) => e,
             Err(_) => continue,
         };
-
         let name = entry.file_name();
         let name_str = name.to_string_lossy();
         let pid: u32 = match name_str.parse() {
@@ -57,138 +182,13 @@ pub fn read_proc_tasks() -> Result<HashMap<u32, ProcTaskInfo>> {
             Err(_) => continue,
         };
 
-        match read_proc_task(pid) {
-            Ok(info) => {
-                tasks.insert(pid, info);
-            }
+        let cmdline = match fs::read_to_string(format!("/proc/{pid}/cmdline")) {
+            Ok(s) => s.replace('\0', " ").trim().to_string(),
             Err(_) => continue,
+        };
+        if cmdline.is_empty() {
+            continue;
         }
+        let _ = loader.seed_cmdline(pid, &cmdline);
     }
-
-    Ok(tasks)
-}
-
-/// Information read from /proc/[pid]/ files.
-pub struct ProcTaskInfo {
-    pub pid: u32,
-    pub ppid: u32,
-    pub state: char,
-    pub comm: String,
-    pub cmdline: String,
-    pub uid: u32,
-    pub priority: i32,
-    pub nice: i32,
-    pub num_threads: u32,
-    pub vsize: u64,
-    pub rss_pages: u64,
-    pub utime_ticks: u64,
-    pub stime_ticks: u64,
-    pub start_time_ticks: u64,
-    pub cgroup_path: String,
-}
-
-fn read_proc_task(pid: u32) -> Result<ProcTaskInfo> {
-    let stat_content =
-        fs::read_to_string(format!("/proc/{pid}/stat")).context("reading stat")?;
-
-    // Parse stat: pid (comm) state ppid ...
-    // comm can contain spaces and parens, so find the last ')'
-    let comm_start = stat_content
-        .find('(')
-        .context("parsing stat: no comm start")?;
-    let comm_end = stat_content
-        .rfind(')')
-        .context("parsing stat: no comm end")?;
-    let comm = stat_content[comm_start + 1..comm_end].to_string();
-    let rest = &stat_content[comm_end + 2..]; // skip ") "
-    let fields: Vec<&str> = rest.split_whitespace().collect();
-
-    // Fields after (comm): state(0) ppid(1) pgrp(2) session(3) tty_nr(4)
-    //   tpgid(5) flags(6) minflt(7) cminflt(8) majflt(9) cmajflt(10)
-    //   utime(11) stime(12) cutime(13) cstime(14) priority(15) nice(16)
-    //   num_threads(17) itrealvalue(18) starttime(19) vsize(20) rss(21)
-    let state = fields.first().and_then(|s| s.chars().next()).unwrap_or('?');
-    let ppid: u32 = fields.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
-    let utime: u64 = fields.get(11).and_then(|s| s.parse().ok()).unwrap_or(0);
-    let stime: u64 = fields.get(12).and_then(|s| s.parse().ok()).unwrap_or(0);
-    let priority: i32 = fields.get(15).and_then(|s| s.parse().ok()).unwrap_or(20);
-    let nice: i32 = fields.get(16).and_then(|s| s.parse().ok()).unwrap_or(0);
-    let num_threads: u32 = fields.get(17).and_then(|s| s.parse().ok()).unwrap_or(1);
-    let start_time: u64 = fields.get(19).and_then(|s| s.parse().ok()).unwrap_or(0);
-    let vsize: u64 = fields.get(20).and_then(|s| s.parse().ok()).unwrap_or(0);
-    let rss_pages: u64 = fields.get(21).and_then(|s| s.parse().ok()).unwrap_or(0);
-
-    let cmdline = fs::read_to_string(format!("/proc/{pid}/cmdline"))
-        .unwrap_or_default()
-        .replace('\0', " ")
-        .trim()
-        .to_string();
-
-    let uid = read_uid(pid).unwrap_or(0);
-
-    let cgroup_path = fs::read_to_string(format!("/proc/{pid}/cgroup"))
-        .ok()
-        .and_then(|content| {
-            for line in content.lines() {
-                let parts: Vec<&str> = line.splitn(3, ':').collect();
-                if parts.len() == 3 && parts[0] == "0" {
-                    return Some(parts[2].to_string());
-                }
-            }
-            content.lines().next().and_then(|line| {
-                let parts: Vec<&str> = line.splitn(3, ':').collect();
-                if parts.len() == 3 {
-                    Some(parts[2].to_string())
-                } else {
-                    None
-                }
-            })
-        })
-        .unwrap_or_default();
-
-    Ok(ProcTaskInfo {
-        pid,
-        ppid,
-        state,
-        comm,
-        cmdline,
-        uid,
-        priority,
-        nice,
-        num_threads,
-        vsize,
-        rss_pages,
-        utime_ticks: utime,
-        stime_ticks: stime,
-        start_time_ticks: start_time,
-        cgroup_path,
-    })
-}
-
-fn read_uid(pid: u32) -> Result<u32> {
-    let content = fs::read_to_string(format!("/proc/{pid}/status"))?;
-    for line in content.lines() {
-        if line.starts_with("Uid:") {
-            let uid: u32 = line
-                .split_whitespace()
-                .nth(1)
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(0);
-            return Ok(uid);
-        }
-    }
-    Ok(0)
-}
-
-/// Read shared memory (SHR) for a process from /proc/[pid]/statm.
-pub fn read_shared_pages(pid: u32) -> u64 {
-    fs::read_to_string(format!("/proc/{pid}/statm"))
-        .ok()
-        .and_then(|content| {
-            content
-                .split_whitespace()
-                .nth(2)
-                .and_then(|s| s.parse().ok())
-        })
-        .unwrap_or(0)
 }

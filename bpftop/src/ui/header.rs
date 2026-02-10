@@ -20,7 +20,10 @@ impl<'a> Widget for HeaderWidget<'a> {
             return;
         }
 
-        let num_cpus = self.sys.cpus.len().max(1);
+        let num_cpus = self.sys.cpus.len();
+        if num_cpus == 0 {
+            return;
+        }
         let (grid_cols, grid_rows) = cpu_grid_dims(num_cpus, area.width);
 
         // Vertical layout: cpu_rows + mem + swap + info

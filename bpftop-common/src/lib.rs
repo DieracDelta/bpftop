@@ -3,7 +3,8 @@
 /// Process/task information collected by the eBPF task iterator.
 /// This struct is written by the eBPF program and read by userspace.
 #[repr(C)]
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy)]
+#[cfg_attr(feature = "userspace", derive(Debug))]
 pub struct TaskInfo {
     /// Process ID (tgid in kernel terms)
     pub pid: u32,
@@ -30,11 +31,31 @@ pub struct TaskInfo {
     pub start_time_ns: u64,
     /// Process name (comm), null-terminated
     pub comm: [u8; 16],
+    /// Kernel priority (task->prio)
+    pub prio: i32,
+    /// Static priority (nice = static_prio - 120)
+    pub static_prio: i32,
+    /// Shared memory pages (from mm_rss_stat MM_SHMEMPAGES)
+    pub shmem_pages: u64,
+    /// Cgroup inode ID for container detection
+    pub cgroup_id: u64,
+}
+
+/// Command line event captured by sched_process_exec tracepoint.
+/// Stored in CMDLINE_MAP keyed by PID.
+#[repr(C)]
+#[derive(Clone, Copy)]
+#[cfg_attr(feature = "userspace", derive(Debug))]
+pub struct CmdlineEvent {
+    pub pid: u32,
+    pub len: u32,
+    pub cmdline: [u8; 256],
 }
 
 /// File descriptor information collected by the eBPF file iterator.
 #[repr(C)]
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy)]
+#[cfg_attr(feature = "userspace", derive(Debug))]
 pub struct FileInfo {
     /// Process ID that owns this FD
     pub pid: u32,
@@ -65,3 +86,6 @@ unsafe impl aya::Pod for TaskInfo {}
 
 #[cfg(feature = "userspace")]
 unsafe impl aya::Pod for FileInfo {}
+
+#[cfg(feature = "userspace")]
+unsafe impl aya::Pod for CmdlineEvent {}

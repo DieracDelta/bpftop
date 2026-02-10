@@ -17,6 +17,7 @@ use crate::data::process::{
     compare_processes, matches_filter, ProcessInfo, SortColumn,
 };
 use crate::data::system::SystemInfo;
+use crate::ebpf::loader::EbpfLoader;
 use crate::input;
 use crate::theme::Theme;
 use crate::ui::dialogs::{HelpDialog, KillDialog};
@@ -100,8 +101,18 @@ impl App {
         let tree_view = config.general.tree_view;
         let show_threads = config.general.show_threads;
         let show_kernel_threads = config.general.show_kernel_threads;
-        let collector = Collector::new();
-        let ebpf_loaded = collector.ebpf_loaded();
+        let ebpf = match EbpfLoader::load() {
+            Ok(loader) => {
+                log::info!("eBPF programs loaded successfully");
+                loader
+            }
+            Err(e) => {
+                log::warn!("eBPF not available: {e}");
+                EbpfLoader::noop()
+            }
+        };
+        let ebpf_loaded = ebpf.is_loaded();
+        let collector = Collector::new(ebpf);
 
         Self {
             mode: AppMode::Normal,

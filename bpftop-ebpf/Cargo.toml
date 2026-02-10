@@ -4,9 +4,11 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-aya-bpf = "0.1"
-aya-log-ebpf = "0.1"
+aya-ebpf = { git = "https://github.com/aya-rs/aya", branch = "main" }
 bpftop-common = { path = "../bpftop-common", default-features = false }
+
+[profile.release]
+debug = 2
 
 [[bin]]
 name = "bpftop-ebpf"
