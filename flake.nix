@@ -80,65 +80,89 @@
             outputHashAlgo = "sha256";
             outputHash = "sha256-J7H0kMUUfLr0sesuIih9Dm5VOOd0w9u5nfwNjT+QDqI=";
           };
+          mkBpftop = { pname, rustToolchain, cargoTarget ? null, extraNativeBuildInputs ? [], env ? {} }:
+            let
+              targetFlag = if cargoTarget != null then "--target ${cargoTarget}" else "";
+              outputDir = if cargoTarget != null then "target/${cargoTarget}/release" else "target/release";
+            in pkgs.stdenv.mkDerivation ({
+              inherit pname;
+              version = "0.1.0";
+              src = ./.;
+
+              nativeBuildInputs = [
+                rustToolchain
+                bpfLinker
+                pkgs.llvmPackages_22.clang
+                pkgs.llvmPackages_22.llvm
+                pkgs.pkg-config
+              ] ++ extraNativeBuildInputs;
+
+              buildInputs = [ pkgs.elfutils ];
+
+              configurePhase = ''
+                runHook preConfigure
+
+                export HOME=$(mktemp -d)
+
+                # Vendor workspace deps (substitute @vendor@ placeholder)
+                mkdir -p .cargo
+                substitute ${workspaceVendor}/.cargo/config.toml .cargo/config.toml \
+                  --subst-var-by vendor ${workspaceVendor}
+                echo '[alias]' >> .cargo/config.toml
+                echo 'xtask = "run --package xtask --"' >> .cargo/config.toml
+
+                # Vendor eBPF deps + linker config
+                mkdir -p bpftop-ebpf/.cargo
+                substitute ${ebpfVendor}/.cargo/config.toml bpftop-ebpf/.cargo/config.toml \
+                  --subst-var-by vendor ${ebpfVendor}
+                echo '[target.bpfel-unknown-none]' >> bpftop-ebpf/.cargo/config.toml
+                echo 'linker = "bpf-linker"' >> bpftop-ebpf/.cargo/config.toml
+                echo 'rustflags = ["-Clink-arg=--btf"]' >> bpftop-ebpf/.cargo/config.toml
+
+                runHook postConfigure
+              '';
+
+              buildPhase = ''
+                runHook preBuild
+
+                # Phase 1: Build eBPF object
+                pushd bpftop-ebpf
+                cargo build --target bpfel-unknown-none -Z build-std=core --release
+                popd
+
+                # Phase 2: Build userspace (embeds eBPF via include_bytes_aligned!)
+                cargo build --release --bin bpftop ${targetFlag}
+
+                runHook postBuild
+              '';
+
+              installPhase = ''
+                runHook preInstall
+                mkdir -p $out/bin
+                cp ${outputDir}/bpftop $out/bin/
+                runHook postInstall
+              '';
+            } // env);
+
+          muslCC = pkgs.pkgsCross.musl64.stdenv.cc;
+
         in {
-          default = pkgs.stdenv.mkDerivation {
+          default = mkBpftop {
             pname = "bpftop";
-            version = "0.1.0";
-            src = ./.;
+            rustToolchain = rustNightly;
+          };
 
-            nativeBuildInputs = [
-              rustNightly
-              bpfLinker
-              pkgs.llvmPackages_22.clang
-              pkgs.llvmPackages_22.llvm
-              pkgs.pkg-config
-            ];
-
-            buildInputs = [ pkgs.elfutils ];
-
-            configurePhase = ''
-              runHook preConfigure
-
-              export HOME=$(mktemp -d)
-
-              # Vendor workspace deps (substitute @vendor@ placeholder)
-              mkdir -p .cargo
-              substitute ${workspaceVendor}/.cargo/config.toml .cargo/config.toml \
-                --subst-var-by vendor ${workspaceVendor}
-              echo '[alias]' >> .cargo/config.toml
-              echo 'xtask = "run --package xtask --"' >> .cargo/config.toml
-
-              # Vendor eBPF deps + linker config
-              mkdir -p bpftop-ebpf/.cargo
-              substitute ${ebpfVendor}/.cargo/config.toml bpftop-ebpf/.cargo/config.toml \
-                --subst-var-by vendor ${ebpfVendor}
-              echo '[target.bpfel-unknown-none]' >> bpftop-ebpf/.cargo/config.toml
-              echo 'linker = "bpf-linker"' >> bpftop-ebpf/.cargo/config.toml
-              echo 'rustflags = ["-Clink-arg=--btf"]' >> bpftop-ebpf/.cargo/config.toml
-
-              runHook postConfigure
-            '';
-
-            buildPhase = ''
-              runHook preBuild
-
-              # Phase 1: Build eBPF object
-              pushd bpftop-ebpf
-              cargo build --target bpfel-unknown-none -Z build-std=core --release
-              popd
-
-              # Phase 2: Build userspace (embeds eBPF via include_bytes_aligned!)
-              cargo build --release --bin bpftop
-
-              runHook postBuild
-            '';
-
-            installPhase = ''
-              runHook preInstall
-              mkdir -p $out/bin
-              cp target/release/bpftop $out/bin/
-              runHook postInstall
-            '';
+          static = mkBpftop {
+            pname = "bpftop-static";
+            rustToolchain = pkgs.rust-bin.nightly.latest.default.override {
+              extensions = [ "rust-src" ];
+              targets = [ "x86_64-unknown-linux-musl" ];
+            };
+            cargoTarget = "x86_64-unknown-linux-musl";
+            extraNativeBuildInputs = [ muslCC ];
+            env = {
+              CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER = "${muslCC}/bin/x86_64-unknown-linux-musl-cc";
+            };
           };
         }
       );
