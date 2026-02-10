@@ -217,8 +217,8 @@ fn handle_visual_key(app: &mut App, key: KeyEvent) -> bool {
             app.mode = AppMode::Normal;
         }
 
-        // F9: tag the visual range, open kill dialog, exit visual mode
-        KeyCode::F(9) => {
+        // F9/x: tag the visual range, open kill dialog, exit visual mode
+        KeyCode::F(9) | KeyCode::Char('x') => {
             app.tag_visual_range();
             app.visual_anchor = None;
             app.kill_signal_idx = 0;

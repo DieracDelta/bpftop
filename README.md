@@ -97,6 +97,10 @@ The build is two-phase. Phase 1 compiles the eBPF program (`bpftop-ebpf`) for th
 
 The nix package builds bpf-linker v0.10.1 from source against LLVM 22 to match the nightly rust toolchain's LLVM version. nixpkgs ships bpf-linker 0.9.15 with LLVM 21 which can't read object files produced by the newer LLVM.
 
+# Supported Systems
+
+Tested on two NixOS machines only — one aarch64-linux and one x86_64-linux.
+
 # Limitations
 
 Kernel struct field offsets (e.g. `task_struct`, `mm_struct`) are hardcoded per architecture at compile time. This means the eBPF program must be built with the correct `--features arch-x86_64` or `--features arch-aarch64` flag, and may break across kernel versions if struct layouts change.
