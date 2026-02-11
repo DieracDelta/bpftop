@@ -136,6 +136,10 @@ bpftop uses a BPF task iterator to walk the kernel's task list in a single pass,
 
 ![Collection Time](bench/results/collection_time.png)
 
+**CPU time (user + kernel)** — Total CPU time consumed per refresh, combining both userspace and kernel time. htop's per-PID `/proc` scraping burns CPU linearly in both user and kernel mode; bpftop stays flat because the BPF iterator does a single kernel-side walk.
+
+![CPU Time](bench/results/cpu_time.png)
+
 **Syscall breakdown at N=5000** — Per-syscall counts from `strace -f -c` showing htop dominated by `read`/`openat`/`close` (per-PID `/proc` scraping) while bpftop's counts are near zero on the log scale.
 
 ![Syscall Breakdown](bench/results/syscall_breakdown.png)

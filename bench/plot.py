@@ -291,6 +291,62 @@ def plot_syscall_breakdown(results_dir, output_dir, target_n=5000):
     print(f"  Saved {out}")
 
 
+def plot_cpu_time(results_dir, output_dir):
+    """Graph 4: Total CPU time (user + system) vs process count.
+
+    Uses hyperfine's user/system fields which capture actual CPU time
+    spent in both userspace and kernel, proving bpftop uses fewer total
+    CPU resources — not just lower wall-clock time.
+    """
+    bpf_times = []
+    htop_times = []
+    scales_found = []
+
+    for n in SCALES:
+        bpf = load_hyperfine(results_dir, "bpftop", n)
+        ht = load_hyperfine(results_dir, "htop", n)
+        if bpf is None and ht is None:
+            continue
+
+        scales_found.append(n)
+        if bpf and "user" in bpf and "system" in bpf:
+            bpf_times.append((bpf["user"] + bpf["system"]) * 1000)  # s -> ms
+        else:
+            bpf_times.append(None)
+        if ht and "user" in ht and "system" in ht:
+            htop_times.append((ht["user"] + ht["system"]) * 1000)
+        else:
+            htop_times.append(None)
+
+    if not scales_found:
+        print("WARNING: No hyperfine data with user/system fields, skipping cpu_time.png")
+        return
+
+    fig, ax = plt.subplots(figsize=(10, 6))
+
+    ht_x = [s for s, t in zip(scales_found, htop_times) if t is not None]
+    ht_y = np.array([t for t in htop_times if t is not None])
+    bpf_x = [s for s, t in zip(scales_found, bpf_times) if t is not None]
+    bpf_y = np.array([t for t in bpf_times if t is not None])
+
+    if len(ht_x) > 0:
+        ax.plot(ht_x, ht_y, color=BR_RED, marker="o",
+                linewidth=2, markersize=8, label="htop", zorder=3)
+    if len(bpf_x) > 0:
+        ax.plot(bpf_x, bpf_y, color=BR_GREEN, marker="s",
+                linewidth=2, markersize=8, label="bpftop", zorder=3)
+
+    ax.set_xlabel("Process Count")
+    ax.set_ylabel("CPU Time (ms)  [user + system]")
+    ax.set_title("Total CPU Time: bpftop vs htop", fontsize=14, fontweight="bold")
+    ax.legend(fontsize=12)
+
+    out = os.path.join(output_dir, "cpu_time.png")
+    fig.savefig(out)
+    plt.close(fig)
+    print(f"  Saved {out}")
+
+
 def main():
     parser = argparse.ArgumentParser(description="Generate benchmark graphs")
     parser.add_argument(
@@ -314,6 +370,7 @@ def main():
     plot_syscall_scaling(results_dir, output_dir)
     plot_collection_time(results_dir, output_dir)
     plot_syscall_breakdown(results_dir, output_dir)
+    plot_cpu_time(results_dir, output_dir)
     print("Done.")
     return 0
 
