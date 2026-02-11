@@ -64,6 +64,19 @@ fn handle_normal_key(app: &mut App, key: KeyEvent) -> bool {
                 }
                 return false;
             }
+            ('z', KeyCode::Char(c)) if app.tree_view => {
+                match c {
+                    'o' => app.expand_tree_node(),
+                    'c' => app.collapse_tree_node(),
+                    'a' => app.toggle_tree_node(),
+                    'O' => app.expand_tree_recursive(),
+                    'C' => app.collapse_tree_recursive(),
+                    'M' => app.collapse_all_tree(),
+                    'R' => app.expand_all_tree(),
+                    _ => {}
+                }
+                return false;
+            }
             _ => { /* cancel pending, fall through to handle current key */ }
         }
     }
@@ -139,6 +152,8 @@ fn handle_normal_key(app: &mut App, key: KeyEvent) -> bool {
         KeyCode::Char('g') => app.pending_key = Some('g'),
         // Yank (yy, yp, yu, yc, yn)
         KeyCode::Char('y') => app.pending_key = Some('y'),
+        // Vim fold (zo, zc, za, zO, zC, zM, zR)
+        KeyCode::Char('z') => app.pending_key = Some('z'),
         KeyCode::Char('G') => { app.push_jump_mark(); app.select_last(); }
 
         // Jump forward (Tab = Ctrl+I in terminals)
@@ -203,6 +218,18 @@ fn handle_normal_key(app: &mut App, key: KeyEvent) -> bool {
         }
         KeyCode::Char('T') => {
             app.sort_column = SortColumn::Time;
+            app.sort_ascending = false;
+
+            app.update_filtered_processes();
+        }
+        KeyCode::Char('N') => {
+            app.sort_column = SortColumn::GpuPercent;
+            app.sort_ascending = false;
+
+            app.update_filtered_processes();
+        }
+        KeyCode::Char('W') => {
+            app.sort_column = SortColumn::GpuMem;
             app.sort_ascending = false;
 
             app.update_filtered_processes();

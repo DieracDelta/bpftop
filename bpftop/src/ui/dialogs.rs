@@ -62,10 +62,16 @@ impl<'a> Widget for HelpDialog<'a> {
             ("P", "Sort by CPU%"),
             ("M", "Sort by MEM%"),
             ("T", "Sort by TIME"),
+            ("N", "Sort by GPU%"),
+            ("W", "Sort by GPU MEM"),
             ("I", "Invert sort order"),
             ("S", "Toggle full slice path"),
             ("A", "Toggle all unit types"),
             ("+ / -", "Expand/Collapse tree node"),
+            ("zo / zc", "Open/Close fold (vim)"),
+            ("za", "Toggle fold"),
+            ("zO / zC", "Open/Close fold recursive"),
+            ("zR / zM", "Open/Close all folds"),
         ];
 
         let lines: Vec<Line> = bindings

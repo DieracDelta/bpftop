@@ -593,6 +593,99 @@ impl App {
         }
     }
 
+    pub fn toggle_tree_node(&mut self) {
+        if let Some(proc) = self.filtered_processes.get(self.selected) {
+            let pid = proc.pid;
+            let has_children = !proc.children.is_empty();
+            if self.collapsed_pids.contains(&pid) {
+                self.collapsed_pids.remove(&pid);
+                self.update_filtered_processes();
+            } else if has_children {
+                self.collapsed_pids.insert(pid);
+                self.update_filtered_processes();
+            }
+        }
+    }
+
+    pub fn expand_tree_recursive(&mut self) {
+        if let Some(proc) = self.filtered_processes.get(self.selected) {
+            let pid = proc.pid;
+            self.collapsed_pids.remove(&pid);
+            for desc in self.descendant_pids(pid) {
+                self.collapsed_pids.remove(&desc);
+            }
+            self.update_filtered_processes();
+        }
+    }
+
+    pub fn collapse_tree_recursive(&mut self) {
+        if let Some(proc) = self.filtered_processes.get(self.selected) {
+            let pid = proc.pid;
+            if !proc.children.is_empty() {
+                self.collapsed_pids.insert(pid);
+            }
+            for anc in self.ancestor_pids(pid) {
+                self.collapsed_pids.insert(anc);
+            }
+            self.update_filtered_processes();
+        }
+    }
+
+    pub fn expand_all_tree(&mut self) {
+        self.collapsed_pids.clear();
+        self.update_filtered_processes();
+    }
+
+    pub fn collapse_all_tree(&mut self) {
+        let parent_pids: Vec<u32> = self
+            .all_processes
+            .iter()
+            .filter(|p| !p.children.is_empty())
+            .map(|p| p.pid)
+            .collect();
+        for pid in parent_pids {
+            self.collapsed_pids.insert(pid);
+        }
+        self.update_filtered_processes();
+    }
+
+    fn descendant_pids(&self, pid: u32) -> Vec<u32> {
+        let child_map: HashMap<u32, &Vec<u32>> = self
+            .all_processes
+            .iter()
+            .map(|p| (p.pid, &p.children))
+            .collect();
+        let mut result = Vec::new();
+        let mut stack = vec![pid];
+        while let Some(current) = stack.pop() {
+            if let Some(children) = child_map.get(&current) {
+                for &child in children.iter() {
+                    result.push(child);
+                    stack.push(child);
+                }
+            }
+        }
+        result
+    }
+
+    fn ancestor_pids(&self, pid: u32) -> Vec<u32> {
+        let ppid_map: HashMap<u32, u32> = self
+            .all_processes
+            .iter()
+            .map(|p| (p.pid, p.ppid))
+            .collect();
+        let mut result = Vec::new();
+        let mut current = pid;
+        while let Some(&parent) = ppid_map.get(&current) {
+            if parent == 0 || parent == current {
+                break;
+            }
+            result.push(parent);
+            current = parent;
+        }
+        result
+    }
+
     // --- Flash message ---
 
     pub fn flash(&mut self, msg: String) {
