@@ -348,16 +348,14 @@ fn check_cmdline_map(bpf: &Ebpf) {
                 Ok(hash) => {
                     let mut count = 0;
                     let mut shown = 0;
-                    for item in hash.iter() {
-                        if let Ok((pid, event)) = item {
-                            count += 1;
-                            if shown < 5 {
-                                let len = (event.len as usize).min(event.cmdline.len());
-                                let cmdline = String::from_utf8_lossy(&event.cmdline[..len])
-                                    .replace('\0', " ");
-                                println!("  PID={pid:<6} cmdline={}", cmdline.trim());
-                                shown += 1;
-                            }
+                    for (pid, event) in hash.iter().flatten() {
+                        count += 1;
+                        if shown < 5 {
+                            let len = (event.len as usize).min(event.cmdline.len());
+                            let cmdline = String::from_utf8_lossy(&event.cmdline[..len])
+                                .replace('\0', " ");
+                            println!("  PID={pid:<6} cmdline={}", cmdline.trim());
+                            shown += 1;
                         }
                     }
                     println!("  Total CMDLINE_MAP entries: {count}");

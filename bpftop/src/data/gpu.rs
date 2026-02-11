@@ -4,6 +4,7 @@ use std::collections::HashMap;
 #[derive(Debug, Clone, Default)]
 pub struct GpuDeviceInfo {
     pub index: u32,
+    #[allow(dead_code)]
     pub name: String,
     pub utilization_pct: u32,
     pub memory_used: u64,

@@ -5,6 +5,7 @@ use std::cmp::Ordering;
 pub struct ProcessInfo {
     pub pid: u32,
     pub ppid: u32,
+    #[allow(dead_code)]
     pub uid: u32,
     pub user: String,
     pub state: ProcessState,
@@ -18,6 +19,7 @@ pub struct ProcessInfo {
     pub gpu_percent: f64,
     pub gpu_mem_bytes: u64,
     pub cpu_time_secs: f64,
+    #[allow(dead_code)]
     pub start_time_ns: u64,
     pub comm: String,
     pub cmdline: String,
@@ -33,6 +35,7 @@ pub struct ProcessInfo {
     /// Whether this is a user thread (tid != pid).
     pub is_thread: bool,
     /// Thread ID (only differs from pid for threads).
+    #[allow(dead_code)]
     pub tid: u32,
     /// Tagged by user (space key).
     pub tagged: bool,
@@ -41,6 +44,7 @@ pub struct ProcessInfo {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
 pub enum ProcessState {
     Running,
     Sleeping,
@@ -54,6 +58,7 @@ pub enum ProcessState {
 }
 
 impl ProcessState {
+    #[allow(dead_code)]
     pub fn from_proc_stat(c: char) -> Self {
         match c {
             'R' => Self::Running,
@@ -286,7 +291,7 @@ pub fn matches_filter(proc: &ProcessInfo, filter: &str) -> bool {
         || proc.cmdline.to_lowercase().contains(&filter_lower)
         || proc.pid.to_string().contains(filter)
         || proc.user.to_lowercase().contains(&filter_lower)
-        || proc.service.as_deref().map_or(false, |s| s.to_lowercase().contains(&filter_lower))
+        || proc.service.as_deref().is_some_and(|s| s.to_lowercase().contains(&filter_lower))
 }
 
 /// Format bytes into human-readable form (K, M, G).

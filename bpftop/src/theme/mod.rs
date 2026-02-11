@@ -1,4 +1,5 @@
 pub mod gruvbox;
+#[allow(dead_code)]
 pub mod palette;
 
 use ratatui::style::Color;
@@ -30,6 +31,7 @@ pub struct Theme {
 
     // Process states
     pub proc_running: Color,
+    #[allow(dead_code)]
     pub proc_sleeping: Color,
     pub proc_zombie: Color,
     pub proc_stopped: Color,

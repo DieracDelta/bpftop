@@ -122,13 +122,11 @@ impl<'a> ProcessTableWidget<'a> {
     }
 
     fn render_row(&self, area: Rect, buf: &mut Buffer, proc: &ProcessInfo, selected: bool, abs_index: usize) {
-        let in_visual = self.visual_range.map_or(false, |(lo, hi)| abs_index >= lo && abs_index <= hi);
+        let in_visual = self.visual_range.is_some_and(|(lo, hi)| abs_index >= lo && abs_index <= hi);
 
         let bg = if selected {
             self.theme.selection_bg
-        } else if in_visual {
-            self.theme.visual_bg
-        } else if proc.tagged {
+        } else if in_visual || proc.tagged {
             self.theme.visual_bg
         } else {
             self.theme.bg

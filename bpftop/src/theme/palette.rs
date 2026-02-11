@@ -2,7 +2,6 @@ use ratatui::style::Color;
 
 /// Gruvbox color palette definitions.
 /// See: https://github.com/morhetz/gruvbox
-
 // === Dark background shades ===
 pub const DARK_BG: Color = Color::Rgb(40, 40, 40);       // #282828 bg
 pub const DARK_BG0_H: Color = Color::Rgb(29, 32, 33);    // #1d2021 bg0_h (hard)

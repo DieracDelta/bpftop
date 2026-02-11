@@ -5,7 +5,7 @@ pub fn cpu_grid_dims(num_cpus: usize, terminal_width: u16) -> (usize, usize) {
     let min_col_width: u16 = 20;
     let max_cols = (terminal_width / min_col_width).max(1) as usize;
     let cols = max_cols.min(num_cpus).max(1);
-    let rows = (num_cpus + cols - 1) / cols;
+    let rows = num_cpus.div_ceil(cols);
     (cols, rows)
 }
 

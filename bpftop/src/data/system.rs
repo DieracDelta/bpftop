@@ -6,6 +6,7 @@ use super::gpu::GpuDeviceInfo;
 /// System-wide information: CPU, memory, swap, load, uptime.
 #[derive(Debug, Clone, Default)]
 pub struct SystemInfo {
+    #[allow(dead_code)]
     pub cpu_total: CpuStats,
     pub cpus: Vec<CpuStats>,
     pub memory: MemoryInfo,
@@ -16,6 +17,7 @@ pub struct SystemInfo {
     pub user_threads: u32,
     pub kernel_threads: u32,
     pub running_tasks: u32,
+    #[allow(dead_code)]
     pub sleeping_tasks: u32,
     pub gpus: Vec<GpuDeviceInfo>,
 }
@@ -77,6 +79,7 @@ pub struct MemoryInfo {
 }
 
 impl MemoryInfo {
+    #[allow(dead_code)]
     pub fn used_pct(&self) -> f64 {
         if self.total == 0 { 0.0 } else { self.used as f64 / self.total as f64 * 100.0 }
     }
@@ -90,6 +93,7 @@ pub struct SwapInfo {
 }
 
 impl SwapInfo {
+    #[allow(dead_code)]
     pub fn used_pct(&self) -> f64 {
         if self.total == 0 { 0.0 } else { self.used as f64 / self.total as f64 * 100.0 }
     }

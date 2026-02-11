@@ -7,10 +7,12 @@ use std::path::Path;
 #[derive(Debug, Clone)]
 pub struct ContainerInfo {
     pub name: String,
+    #[allow(dead_code)]
     pub runtime: ContainerRuntime,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
 pub enum ContainerRuntime {
     Docker,
     Containerd,

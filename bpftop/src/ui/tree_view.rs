@@ -6,8 +6,10 @@ use crate::data::process::ProcessInfo;
 #[derive(Debug, Clone)]
 pub struct TreeEntry {
     pub pid: u32,
+    #[allow(dead_code)]
     pub depth: u16,
     pub prefix: String, // e.g., "├─" or "└─"
+    #[allow(dead_code)]
     pub is_last: bool,
     pub has_children: bool,
     pub collapsed: bool,
@@ -78,7 +80,7 @@ fn build_subtree(
 
     let has_children = children_map
         .get(&pid)
-        .map_or(false, |c| !c.is_empty());
+        .is_some_and(|c| !c.is_empty());
     let is_collapsed = collapsed.contains(&pid);
 
     entries.push(TreeEntry {

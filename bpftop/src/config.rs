@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use crate::theme::ThemeOverrides;
 
 /// Application configuration loaded from ~/.config/bpftop/config.toml.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Config {
     #[serde(default)]
     pub general: GeneralConfig,
@@ -69,14 +69,6 @@ fn default_preset() -> String {
     "gruvbox-dark".to_string()
 }
 
-impl Default for Config {
-    fn default() -> Self {
-        Self {
-            general: GeneralConfig::default(),
-            theme: ThemeConfig::default(),
-        }
-    }
-}
 
 impl Config {
     /// Load config from the default path, or return defaults if not found.
@@ -94,6 +86,7 @@ impl Config {
     }
 
     /// Save config to the default path.
+    #[allow(dead_code)]
     pub fn save(&self) -> Result<()> {
         let path = config_path();
         if let Some(parent) = path.parent() {
