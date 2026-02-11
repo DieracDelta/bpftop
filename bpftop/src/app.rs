@@ -255,8 +255,10 @@ impl App {
 
         let filter_active = self.mode == AppMode::Search || self.mode == AppMode::Filter;
         let num_cpus = self.sys_info.cpus.len().max(1);
+        let num_gpus = self.sys_info.gpus.len();
+        let has_gpu = num_gpus > 0;
         let (header_area, table_area, status_area, filter_area) =
-            main_layout(area, filter_active, num_cpus);
+            main_layout(area, filter_active, num_cpus, num_gpus);
         self.header_height = header_area.height;
 
         // Header meters
@@ -277,6 +279,7 @@ impl App {
             sort_ascending: self.sort_ascending,
             theme: &self.theme,
             show_container: has_container,
+            show_gpu: has_gpu,
             visual_range: self.visual_range(),
             error_message: self.ebpf_error.as_deref(),
         };
@@ -648,6 +651,20 @@ impl App {
                     "Yanked cmdline".to_string()
                 } else {
                     format!("Yanked {} cmdlines", texts.len())
+                }
+            }
+            YankField::GpuPercent => {
+                if texts.len() == 1 {
+                    format!("Yanked GPU% {}", texts[0])
+                } else {
+                    format!("Yanked {} GPU%", texts.len())
+                }
+            }
+            YankField::GpuMem => {
+                if texts.len() == 1 {
+                    format!("Yanked GMEM {}", texts[0])
+                } else {
+                    format!("Yanked {} GMEM", texts.len())
                 }
             }
         };

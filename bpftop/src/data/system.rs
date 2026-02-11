@@ -1,6 +1,8 @@
 use std::fs;
 use anyhow::{Context, Result};
 
+use super::gpu::GpuDeviceInfo;
+
 /// System-wide information: CPU, memory, swap, load, uptime.
 #[derive(Debug, Clone, Default)]
 pub struct SystemInfo {
@@ -15,6 +17,7 @@ pub struct SystemInfo {
     pub kernel_threads: u32,
     pub running_tasks: u32,
     pub sleeping_tasks: u32,
+    pub gpus: Vec<GpuDeviceInfo>,
 }
 
 /// Per-CPU tick counters from /proc/stat.

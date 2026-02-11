@@ -25,6 +25,8 @@ pub struct Theme {
     pub mem_cached: Color,
     pub mem_buffers: Color,
     pub swap_used: Color,
+    pub gpu_util: Color,
+    pub gpu_mem: Color,
 
     // Process states
     pub proc_running: Color,
@@ -77,6 +79,8 @@ impl Theme {
         if let Some(c) = ov.mem_cached.as_deref().and_then(parse_hex_color) { self.mem_cached = c; }
         if let Some(c) = ov.mem_buffers.as_deref().and_then(parse_hex_color) { self.mem_buffers = c; }
         if let Some(c) = ov.swap_used.as_deref().and_then(parse_hex_color) { self.swap_used = c; }
+        if let Some(c) = ov.gpu_util.as_deref().and_then(parse_hex_color) { self.gpu_util = c; }
+        if let Some(c) = ov.gpu_mem.as_deref().and_then(parse_hex_color) { self.gpu_mem = c; }
         if let Some(c) = ov.status_key.as_deref().and_then(parse_hex_color) { self.status_key = c; }
         if let Some(c) = ov.visual_bg.as_deref().and_then(parse_hex_color) { self.visual_bg = c; }
     }
@@ -99,6 +103,8 @@ pub struct ThemeOverrides {
     pub mem_cached: Option<String>,
     pub mem_buffers: Option<String>,
     pub swap_used: Option<String>,
+    pub gpu_util: Option<String>,
+    pub gpu_mem: Option<String>,
     pub status_key: Option<String>,
     pub visual_bg: Option<String>,
 }

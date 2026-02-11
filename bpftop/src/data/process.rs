@@ -15,6 +15,8 @@ pub struct ProcessInfo {
     pub shr_bytes: u64,
     pub cpu_percent: f64,
     pub mem_percent: f64,
+    pub gpu_percent: f64,
+    pub gpu_mem_bytes: u64,
     pub cpu_time_secs: f64,
     pub start_time_ns: u64,
     pub comm: String,
@@ -104,6 +106,8 @@ impl ProcessInfo {
         self.shr_bytes = src.shr_bytes;
         self.cpu_percent = src.cpu_percent;
         self.mem_percent = src.mem_percent;
+        self.gpu_percent = src.gpu_percent;
+        self.gpu_mem_bytes = src.gpu_mem_bytes;
         self.cpu_time_secs = src.cpu_time_secs;
         self.comm = src.comm.clone();
         self.cmdline = src.cmdline.clone();
@@ -121,6 +125,8 @@ pub enum YankField {
     Container,
     Name,
     Cmdline,
+    GpuPercent,
+    GpuMem,
 }
 
 impl ProcessInfo {
@@ -128,11 +134,13 @@ impl ProcessInfo {
     pub fn yank_text(&self, field: YankField) -> String {
         match field {
             YankField::Row => format!(
-                "{}\t{}\t{:.1}\t{:.1}\t{}\t{}",
+                "{}\t{}\t{:.1}\t{:.1}\t{:.1}\t{}\t{}\t{}",
                 self.pid,
                 self.user,
                 self.cpu_percent,
                 self.mem_percent,
+                self.gpu_percent,
+                format_bytes(self.gpu_mem_bytes),
                 format_time(self.cpu_time_secs),
                 self.cmdline,
             ),
@@ -141,6 +149,8 @@ impl ProcessInfo {
             YankField::Container => self.container.clone().unwrap_or_else(|| "-".to_string()),
             YankField::Name => self.comm.clone(),
             YankField::Cmdline => self.cmdline.clone(),
+            YankField::GpuPercent => format!("{:.1}", self.gpu_percent),
+            YankField::GpuMem => format_bytes(self.gpu_mem_bytes),
         }
     }
 }
@@ -158,6 +168,8 @@ pub enum SortColumn {
     State,
     CpuPercent,
     MemPercent,
+    GpuPercent,
+    GpuMem,
     Time,
     Container,
     Command,
@@ -176,6 +188,8 @@ impl SortColumn {
             Self::State,
             Self::CpuPercent,
             Self::MemPercent,
+            Self::GpuPercent,
+            Self::GpuMem,
             Self::Time,
             Self::Container,
             Self::Command,
@@ -194,6 +208,8 @@ impl SortColumn {
             Self::State => "S",
             Self::CpuPercent => "CPU%",
             Self::MemPercent => "MEM%",
+            Self::GpuPercent => "GPU%",
+            Self::GpuMem => "GMEM",
             Self::Time => "TIME+",
             Self::Container => "CONT",
             Self::Command => "Command",
@@ -213,6 +229,8 @@ impl SortColumn {
             Self::State => 2,
             Self::CpuPercent => 6,
             Self::MemPercent => 6,
+            Self::GpuPercent => 5,
+            Self::GpuMem => 6,
             Self::Time => 10,
             Self::Container => 12,
             Self::Command => 0, // fills remaining space
@@ -241,6 +259,8 @@ pub fn compare_processes(a: &ProcessInfo, b: &ProcessInfo, col: SortColumn, asce
         SortColumn::State => (a.state.as_char()).cmp(&b.state.as_char()).then(a.pid.cmp(&b.pid)),
         SortColumn::CpuPercent => quantize(a.cpu_percent).cmp(&quantize(b.cpu_percent)).then(a.pid.cmp(&b.pid)),
         SortColumn::MemPercent => quantize(a.mem_percent).cmp(&quantize(b.mem_percent)).then(a.pid.cmp(&b.pid)),
+        SortColumn::GpuPercent => quantize(a.gpu_percent).cmp(&quantize(b.gpu_percent)).then(a.pid.cmp(&b.pid)),
+        SortColumn::GpuMem => a.gpu_mem_bytes.cmp(&b.gpu_mem_bytes).then(a.pid.cmp(&b.pid)),
         SortColumn::Time => quantize(a.cpu_time_secs).cmp(&quantize(b.cpu_time_secs)).then(a.pid.cmp(&b.pid)),
         SortColumn::Container => a.container.cmp(&b.container).then(a.pid.cmp(&b.pid)),
         SortColumn::Command => a.cmdline.cmp(&b.cmdline).then(a.pid.cmp(&b.pid)),
@@ -305,6 +325,8 @@ mod tests {
             shr_bytes: 0,
             cpu_percent,
             mem_percent: 0.0,
+            gpu_percent: 0.0,
+            gpu_mem_bytes: 0,
             cpu_time_secs: 0.0,
             start_time_ns: 0,
             comm: String::from("test"),

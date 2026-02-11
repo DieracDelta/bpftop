@@ -21,6 +21,8 @@ pub fn dark() -> Theme {
         mem_cached: BR_BLUE,
         mem_buffers: BR_AQUA,
         swap_used: BR_ORANGE,
+        gpu_util: BR_PURPLE,
+        gpu_mem: BR_AQUA,
 
         // Process states
         proc_running: BR_GREEN,
@@ -62,6 +64,8 @@ pub fn light() -> Theme {
         mem_cached: BLUE,
         mem_buffers: AQUA,
         swap_used: ORANGE,
+        gpu_util: PURPLE,
+        gpu_mem: AQUA,
 
         // Process states
         proc_running: GREEN,

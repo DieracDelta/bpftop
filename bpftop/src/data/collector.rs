@@ -3,6 +3,8 @@ use std::collections::HashMap;
 use anyhow::Result;
 
 use super::container::CgroupResolver;
+#[cfg(feature = "gpu")]
+use super::gpu::GpuCollector;
 use super::process::{ProcessInfo, ProcessState};
 use super::system::*;
 use crate::ebpf::loader::{self, EbpfLoader};
@@ -19,6 +21,8 @@ pub struct Collector {
     prev_cpus: Vec<CpuStats>,
     prev_proc_times: HashMap<u32, u64>,
     page_size: u64,
+    #[cfg(feature = "gpu")]
+    gpu_collector: Option<GpuCollector>,
 }
 
 impl Collector {
@@ -41,6 +45,8 @@ impl Collector {
             prev_cpus,
             prev_proc_times: HashMap::new(),
             page_size,
+            #[cfg(feature = "gpu")]
+            gpu_collector: GpuCollector::try_new(),
         }
     }
 
@@ -54,6 +60,8 @@ impl Collector {
             prev_cpus: Vec::new(),
             prev_proc_times: HashMap::new(),
             page_size: 4096,
+            #[cfg(feature = "gpu")]
+            gpu_collector: None,
         }
     }
 
@@ -195,6 +203,8 @@ impl Collector {
                 shr_bytes,
                 cpu_percent,
                 mem_percent,
+                gpu_percent: 0.0,
+                gpu_mem_bytes: 0,
                 cpu_time_secs,
                 start_time_ns: task.start_time_ns,
                 comm,
@@ -209,6 +219,20 @@ impl Collector {
                 tagged: false,
                 tree_prefix: String::new(),
             });
+        }
+
+        // GPU data
+        let mut gpus = Vec::new();
+        #[cfg(feature = "gpu")]
+        if let Some(ref mut gc) = self.gpu_collector {
+            let (gpu_devices, proc_gpu) = gc.collect();
+            gpus = gpu_devices;
+            for proc in &mut processes {
+                if let Some(usage) = proc_gpu.get(&proc.pid) {
+                    proc.gpu_percent = usage.gpu_percent;
+                    proc.gpu_mem_bytes = usage.gpu_mem_bytes;
+                }
+            }
         }
 
         // Build parent-child relationships for tree view
@@ -250,6 +274,7 @@ impl Collector {
             kernel_threads,
             running_tasks: running,
             sleeping_tasks: sleeping,
+            gpus,
         };
 
         Ok((sys_info, processes))

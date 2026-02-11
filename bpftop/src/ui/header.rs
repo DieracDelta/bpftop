@@ -4,6 +4,7 @@ use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Widget;
 
+use crate::data::gpu::GpuDeviceInfo;
 use crate::data::system::{format_uptime, CpuStats, MemoryInfo, SwapInfo, SystemInfo};
 use crate::theme::Theme;
 use crate::ui::layout::cpu_grid_dims;
@@ -26,10 +27,16 @@ impl<'a> Widget for HeaderWidget<'a> {
         }
         let (grid_cols, grid_rows) = cpu_grid_dims(num_cpus, area.width);
 
-        // Vertical layout: cpu_rows + mem + swap + info
+        let num_gpus = self.sys.gpus.len();
+
+        // Vertical layout: cpu_rows + (gpu * 2) + mem + swap + info
         let mut constraints: Vec<Constraint> = (0..grid_rows)
             .map(|_| Constraint::Length(1))
             .collect();
+        for _ in 0..num_gpus {
+            constraints.push(Constraint::Length(1)); // GPU util
+            constraints.push(Constraint::Length(1)); // GPU mem
+        }
         constraints.push(Constraint::Length(1)); // mem
         constraints.push(Constraint::Length(1)); // swap
         constraints.push(Constraint::Length(1)); // info line
@@ -65,20 +72,34 @@ impl<'a> Widget for HeaderWidget<'a> {
             }
         }
 
+        // GPU bars (2 rows per GPU: utilization + memory)
+        for (gi, gpu) in self.sys.gpus.iter().enumerate() {
+            let util_row = grid_rows + gi * 2;
+            let mem_row = grid_rows + gi * 2 + 1;
+            if util_row < rows.len() {
+                render_gpu_util_bar(buf, rows[util_row], gpu, self.theme);
+            }
+            if mem_row < rows.len() {
+                render_gpu_mem_bar(buf, rows[mem_row], gpu, self.theme);
+            }
+        }
+
+        let gpu_offset = num_gpus * 2;
+
         // Mem bar (full width)
-        let mem_row = grid_rows;
+        let mem_row = grid_rows + gpu_offset;
         if mem_row < rows.len() {
             render_mem_bar(buf, rows[mem_row], &self.sys.memory, self.theme);
         }
 
         // Swap bar (full width)
-        let swap_row = grid_rows + 1;
+        let swap_row = grid_rows + gpu_offset + 1;
         if swap_row < rows.len() {
             render_swap_bar(buf, rows[swap_row], &self.sys.swap, self.theme);
         }
 
         // Info line (full width): Tasks: N, N running  Load: x.xx x.xx x.xx  Uptime: Xd HH:MM:SS
-        let info_row = grid_rows + 2;
+        let info_row = grid_rows + gpu_offset + 2;
         if info_row < rows.len() {
             let info_area = rows[info_row];
             let line = Line::from(vec![
@@ -204,6 +225,82 @@ fn render_mem_bar(buf: &mut Buffer, area: Rect, mem: &MemoryInfo, theme: &Theme)
     }
     if empty > 0 {
         spans.push(Span::styled(" ".repeat(empty), Style::default().fg(theme.fg)));
+    }
+    spans.push(Span::styled(suffix, Style::default().fg(theme.fg)));
+
+    let line = Line::from(spans);
+    buf.set_line(area.x, area.y, &line, area.width);
+}
+
+fn render_gpu_util_bar(buf: &mut Buffer, area: Rect, gpu: &GpuDeviceInfo, theme: &Theme) {
+    if area.width < 10 {
+        return;
+    }
+
+    let prefix = format!("GPU{}[", gpu.index);
+    let suffix = format!("{:4.1}%]", gpu.utilization_pct as f64);
+    let bar_width = (area.width as usize).saturating_sub(prefix.len() + suffix.len());
+    if bar_width == 0 {
+        return;
+    }
+
+    let fill_chars = ((gpu.utilization_pct as f64 / 100.0) * bar_width as f64) as usize;
+    let empty_chars = bar_width.saturating_sub(fill_chars);
+
+    let mut spans = vec![Span::styled(&prefix, Style::default().fg(theme.fg))];
+    if fill_chars > 0 {
+        spans.push(Span::styled(
+            "|".repeat(fill_chars),
+            Style::default().fg(theme.gpu_util),
+        ));
+    }
+    if empty_chars > 0 {
+        spans.push(Span::styled(
+            " ".repeat(empty_chars),
+            Style::default().fg(theme.fg),
+        ));
+    }
+    spans.push(Span::styled(suffix, Style::default().fg(theme.fg)));
+
+    let line = Line::from(spans);
+    buf.set_line(area.x, area.y, &line, area.width);
+}
+
+fn render_gpu_mem_bar(buf: &mut Buffer, area: Rect, gpu: &GpuDeviceInfo, theme: &Theme) {
+    if area.width < 10 || gpu.memory_total == 0 {
+        let line = Line::from(Span::styled(
+            format!("VRAM{}[N/A]", gpu.index),
+            Style::default().fg(theme.fg),
+        ));
+        buf.set_line(area.x, area.y, &line, area.width);
+        return;
+    }
+
+    let used_gb = gpu.memory_used as f64 / (1024.0 * 1024.0 * 1024.0);
+    let total_gb = gpu.memory_total as f64 / (1024.0 * 1024.0 * 1024.0);
+    let prefix = format!("VRAM{}[", gpu.index);
+    let suffix = format!("{used_gb:.1}G/{total_gb:.1}G]");
+    let bar_width = (area.width as usize).saturating_sub(prefix.len() + suffix.len());
+    if bar_width == 0 {
+        return;
+    }
+
+    let used_pct = gpu.memory_used as f64 / gpu.memory_total as f64;
+    let fill_chars = (used_pct * bar_width as f64) as usize;
+    let empty_chars = bar_width.saturating_sub(fill_chars);
+
+    let mut spans = vec![Span::styled(&prefix, Style::default().fg(theme.fg))];
+    if fill_chars > 0 {
+        spans.push(Span::styled(
+            "|".repeat(fill_chars),
+            Style::default().fg(theme.gpu_mem),
+        ));
+    }
+    if empty_chars > 0 {
+        spans.push(Span::styled(
+            " ".repeat(empty_chars),
+            Style::default().fg(theme.fg),
+        ));
     }
     spans.push(Span::styled(suffix, Style::default().fg(theme.fg)));
 

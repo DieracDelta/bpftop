@@ -52,6 +52,8 @@ impl<'a> Widget for HelpDialog<'a> {
             ("yc", "Yank container"),
             ("yn", "Yank command name"),
             ("yl", "Yank full cmdline"),
+            ("yg", "Yank GPU%"),
+            ("yv", "Yank VRAM usage"),
             ("Space", "Tag process"),
             ("u", "Filter by user"),
             ("H", "Toggle user threads"),

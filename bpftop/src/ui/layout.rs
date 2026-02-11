@@ -11,9 +11,10 @@ pub fn cpu_grid_dims(num_cpus: usize, terminal_width: u16) -> (usize, usize) {
 
 /// Main screen layout: header | process_table | status_bar.
 /// Returns (header_area, table_area, status_area, filter_area).
-pub fn main_layout(area: Rect, filter_active: bool, num_cpus: usize) -> (Rect, Rect, Rect, Option<Rect>) {
+pub fn main_layout(area: Rect, filter_active: bool, num_cpus: usize, num_gpus: usize) -> (Rect, Rect, Rect, Option<Rect>) {
     let (_, cpu_rows) = cpu_grid_dims(num_cpus, area.width);
-    let header_height = (cpu_rows + 3) as u16; // cpu grid + mem + swap + info line
+    let gpu_rows = num_gpus * 2; // utilization + memory per GPU
+    let header_height = (cpu_rows + gpu_rows + 3) as u16; // cpu grid + gpu bars + mem + swap + info line
     let status_height = 1;
     let filter_height = if filter_active { 1 } else { 0 };
 

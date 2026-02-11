@@ -51,6 +51,8 @@ fn handle_normal_key(app: &mut App, key: KeyEvent) -> bool {
                     'c' => Some(YankField::Container),
                     'n' => Some(YankField::Name),
                     'l' => Some(YankField::Cmdline),
+                    'g' => Some(YankField::GpuPercent),
+                    'v' => Some(YankField::GpuMem),
                     _ => None,
                 };
                 if let Some(field) = field {
@@ -223,6 +225,8 @@ fn handle_visual_key(app: &mut App, key: KeyEvent) -> bool {
                     'c' => Some(YankField::Container),
                     'n' => Some(YankField::Name),
                     'l' => Some(YankField::Cmdline),
+                    'g' => Some(YankField::GpuPercent),
+                    'v' => Some(YankField::GpuMem),
                     _ => None,
                 };
                 if let Some(field) = field {

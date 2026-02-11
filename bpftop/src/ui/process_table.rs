@@ -15,6 +15,7 @@ pub struct ProcessTableWidget<'a> {
     pub sort_ascending: bool,
     pub theme: &'a Theme,
     pub show_container: bool,
+    pub show_gpu: bool,
     pub visual_range: Option<(usize, usize)>,
     pub error_message: Option<&'a str>,
 }
@@ -181,6 +182,8 @@ impl<'a> ProcessTableWidget<'a> {
             SortColumn::State => format!("{:>w$}", proc.state.as_char()),
             SortColumn::CpuPercent => format!("{:>w$.1}", proc.cpu_percent),
             SortColumn::MemPercent => format!("{:>w$.1}", proc.mem_percent),
+            SortColumn::GpuPercent => format!("{:>w$.1}", proc.gpu_percent),
+            SortColumn::GpuMem => format!("{:>w$}", format_bytes(proc.gpu_mem_bytes)),
             SortColumn::Time => {
                 let t = format_time(proc.cpu_time_secs);
                 format!("{:>w$}", t)
@@ -208,6 +211,7 @@ impl<'a> ProcessTableWidget<'a> {
         let mut cols: Vec<(SortColumn, u16)> = SortColumn::all()
             .iter()
             .filter(|c| **c != SortColumn::Container || self.show_container)
+            .filter(|c| (**c != SortColumn::GpuPercent && **c != SortColumn::GpuMem) || self.show_gpu)
             .map(|c| (*c, c.width()))
             .collect();
 
