@@ -83,10 +83,24 @@ impl Collector {
             }
         };
 
+        // Classify tasks: processes, user threads, kernel threads
+        let mut task_count = 0u32;
+        let mut user_threads = 0u32;
+        let mut kernel_threads = 0u32;
+        for task in &bpf_tasks {
+            let is_kthread = task.ppid == 2 || task.pid == 2;
+            if is_kthread {
+                kernel_threads += 1;
+            } else if task.tid != task.pid {
+                user_threads += 1;
+            } else {
+                task_count += 1;
+            }
+        }
+
         let mut processes = Vec::with_capacity(bpf_tasks.len());
         let mut running = 0u32;
         let mut sleeping = 0u32;
-        let total = bpf_tasks.len() as u32;
 
         // Total CPU ticks delta for percentage calculation
         let total_sys_delta = cpu_total
@@ -125,10 +139,12 @@ impl Collector {
             // wall_ns ≈ total_sys_delta * (1e9 / CLK_TCK) / num_cpus
             let num_cpus = cpus.len().max(1) as f64;
             let cpu_percent = if total_sys_delta > 0 {
-                // CLK_TCK = 100 typically, so 1 tick = 10ms = 10_000_000 ns
+                // total_sys_delta is aggregate ticks across all cores.
+                // Per-core wall time in ns = total_sys_delta / num_cpus * (1e9 / CLK_TCK)
+                // cpu% (Irix mode, 0-100% per core) = delta_ns / wall_ns * 100
                 let wall_delta_ns =
                     total_sys_delta as f64 * 1_000_000_000.0 / 100.0 / num_cpus;
-                (cpu_delta_ns as f64 / wall_delta_ns) * 100.0 * num_cpus
+                (cpu_delta_ns as f64 / wall_delta_ns) * 100.0
             } else {
                 0.0
             };
@@ -224,7 +240,9 @@ impl Collector {
             swap,
             load_avg,
             uptime_secs: uptime,
-            total_tasks: total,
+            total_tasks: task_count,
+            user_threads,
+            kernel_threads,
             running_tasks: running,
             sleeping_tasks: sleeping,
         };

@@ -87,7 +87,11 @@ impl<'a> Widget for HeaderWidget<'a> {
                     format!("{}", self.sys.total_tasks),
                     Style::default().fg(self.theme.fg),
                 ),
-                Span::styled(", ", Style::default().fg(self.theme.fg)),
+                Span::styled(
+                    format!(", {} thr, {} kthr", self.sys.user_threads, self.sys.kernel_threads),
+                    Style::default().fg(self.theme.fg),
+                ),
+                Span::styled("; ", Style::default().fg(self.theme.fg)),
                 Span::styled(
                     format!("{} running", self.sys.running_tasks),
                     Style::default().fg(self.theme.proc_running),
@@ -125,11 +129,14 @@ fn render_cpu_bar(buf: &mut Buffer, area: Rect, cpu: &CpuStats, label: &str, the
         return;
     }
 
+    // Bar fill matches total_pct: all busy components (excludes idle and iowait)
+    // irq + softirq + steal are folded into system color since they're kernel-side
+    let irq_pct = 100.0 - cpu.user_pct - cpu.nice_pct - cpu.system_pct - cpu.iowait_pct - cpu.idle_pct;
+    let irq_pct = irq_pct.max(0.0);
     let user_chars = ((cpu.user_pct / 100.0) * bar_width as f64) as usize;
-    let sys_chars = ((cpu.system_pct / 100.0) * bar_width as f64) as usize;
+    let sys_chars = (((cpu.system_pct + irq_pct) / 100.0) * bar_width as f64) as usize;
     let nice_chars = ((cpu.nice_pct / 100.0) * bar_width as f64) as usize;
-    let iowait_chars = ((cpu.iowait_pct / 100.0) * bar_width as f64) as usize;
-    let empty_chars = bar_width.saturating_sub(user_chars + sys_chars + nice_chars + iowait_chars);
+    let empty_chars = bar_width.saturating_sub(user_chars + sys_chars + nice_chars);
 
     let mut spans = vec![Span::styled(prefix, Style::default().fg(theme.fg))];
     if user_chars > 0 {
@@ -148,12 +155,6 @@ fn render_cpu_bar(buf: &mut Buffer, area: Rect, cpu: &CpuStats, label: &str, the
         spans.push(Span::styled(
             "|".repeat(nice_chars),
             Style::default().fg(theme.cpu_nice),
-        ));
-    }
-    if iowait_chars > 0 {
-        spans.push(Span::styled(
-            "|".repeat(iowait_chars),
-            Style::default().fg(theme.cpu_iowait),
         ));
     }
     if empty_chars > 0 {

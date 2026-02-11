@@ -11,6 +11,8 @@ pub struct SystemInfo {
     pub load_avg: [f64; 3],
     pub uptime_secs: f64,
     pub total_tasks: u32,
+    pub user_threads: u32,
+    pub kernel_threads: u32,
     pub running_tasks: u32,
     pub sleeping_tasks: u32,
 }
@@ -67,6 +69,7 @@ pub struct MemoryInfo {
     pub available: u64,
     pub buffers: u64,
     pub cached: u64,
+    pub s_reclaimable: u64,
     pub used: u64,
 }
 
@@ -150,13 +153,14 @@ pub fn read_memory_info() -> Result<(MemoryInfo, SwapInfo)> {
             "MemAvailable" => mem.available = val,
             "Buffers" => mem.buffers = val,
             "Cached" => mem.cached = val,
+            "SReclaimable" => mem.s_reclaimable = val,
             "SwapTotal" => swap.total = val,
             "SwapFree" => swap.free = val,
             _ => {}
         }
     }
 
-    mem.used = mem.total.saturating_sub(mem.free + mem.buffers + mem.cached);
+    mem.used = mem.total.saturating_sub(mem.free + mem.buffers + mem.cached + mem.s_reclaimable);
     swap.used = swap.total.saturating_sub(swap.free);
 
     Ok((mem, swap))
