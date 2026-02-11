@@ -10,6 +10,7 @@ use crate::theme::Theme;
 pub struct StatusBarWidget<'a> {
     pub theme: &'a Theme,
     pub ebpf_loaded: bool,
+    pub flash: Option<&'a str>,
 }
 
 impl<'a> Widget for StatusBarWidget<'a> {
@@ -52,6 +53,17 @@ impl<'a> Widget for StatusBarWidget<'a> {
                 Style::default()
                     .fg(self.theme.proc_running)
                     .bg(self.theme.status_bg),
+            ));
+        }
+
+        // Flash message (transient yank feedback etc.)
+        if let Some(flash) = self.flash {
+            spans.push(Span::styled(
+                format!("  {flash}"),
+                Style::default()
+                    .fg(self.theme.status_key)
+                    .bg(self.theme.status_bg)
+                    .add_modifier(ratatui::style::Modifier::BOLD),
             ));
         }
 

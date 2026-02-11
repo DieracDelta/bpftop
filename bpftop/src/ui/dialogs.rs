@@ -46,6 +46,12 @@ impl<'a> Widget for HelpDialog<'a> {
             ("Ctrl+O", "Jump back"),
             ("Tab", "Jump forward"),
             ("V", "Visual mode"),
+            ("yy", "Yank row to clipboard"),
+            ("yp", "Yank PID"),
+            ("yu", "Yank user"),
+            ("yc", "Yank container"),
+            ("yn", "Yank command name"),
+            ("yl", "Yank full cmdline"),
             ("Space", "Tag process"),
             ("u", "Filter by user"),
             ("H", "Toggle user threads"),
@@ -74,17 +80,23 @@ impl<'a> Widget for HelpDialog<'a> {
 
 /// Kill signal picker dialog.
 pub struct KillDialog<'a> {
-    pub pid: u32,
+    pub pids: &'a [u32],
+    pub pid_scroll: usize,
     pub selected_signal: usize,
     pub theme: &'a Theme,
 }
 
 impl<'a> Widget for KillDialog<'a> {
     fn render(self, area: Rect, buf: &mut Buffer) {
-        let dialog = centered_rect(40, 60, area);
+        let multi = self.pids.len() > 1;
+        let dialog = centered_rect(if multi { 55 } else { 40 }, 60, area);
         Clear.render(dialog, buf);
 
-        let title = format!(" Send signal to PID {} ", self.pid);
+        let title = if self.pids.len() == 1 {
+            format!(" Send signal to PID {} ", self.pids[0])
+        } else {
+            format!(" Send signal to {} PIDs ", self.pids.len())
+        };
         let block = Block::default()
             .title(title)
             .borders(Borders::ALL)
@@ -96,7 +108,8 @@ impl<'a> Widget for KillDialog<'a> {
 
         let signals = signal_list();
 
-        let lines: Vec<Line> = signals
+        // Build signal lines (shared by both paths)
+        let signal_lines: Vec<Line> = signals
             .iter()
             .enumerate()
             .map(|(i, (num, name))| {
@@ -111,8 +124,62 @@ impl<'a> Widget for KillDialog<'a> {
             })
             .collect();
 
-        let para = Paragraph::new(lines);
-        para.render(inner, buf);
+        if !multi {
+            Paragraph::new(signal_lines).render(inner, buf);
+            return;
+        }
+
+        // Horizontal split: signals on left, PID list on right
+        let chunks = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([
+                Constraint::Length(16), // signal column
+                Constraint::Length(1),  // divider
+                Constraint::Min(8),    // PID list
+            ])
+            .split(inner);
+
+        // Left: signal list
+        Paragraph::new(signal_lines).render(chunks[0], buf);
+
+        // Divider
+        let dim_style = Style::default().fg(self.theme.border);
+        let divider_lines: Vec<Line> = (0..chunks[1].height)
+            .map(|_| Line::styled("\u{2502}", dim_style))
+            .collect();
+        Paragraph::new(divider_lines).render(chunks[1], buf);
+
+        // Right: scrollable PID list
+        let pid_style = Style::default()
+            .fg(self.theme.status_key)
+            .add_modifier(Modifier::BOLD);
+
+        let pid_area = chunks[2];
+        // Reserve 1 row for scroll indicator if needed
+        let visible = if self.pids.len() > pid_area.height as usize {
+            (pid_area.height as usize).saturating_sub(1)
+        } else {
+            pid_area.height as usize
+        };
+        let scroll = self.pid_scroll.min(self.pids.len().saturating_sub(visible));
+
+        let mut pid_lines: Vec<Line> = self.pids
+            .iter()
+            .skip(scroll)
+            .take(visible)
+            .map(|pid| Line::styled(format!(" {pid}"), pid_style))
+            .collect();
+
+        // Scroll indicator at bottom if list overflows
+        if self.pids.len() > visible {
+            let showing_end = (scroll + visible).min(self.pids.len());
+            pid_lines.push(Line::styled(
+                format!(" h/l {}-{}/{}", scroll + 1, showing_end, self.pids.len()),
+                dim_style,
+            ));
+        }
+
+        Paragraph::new(pid_lines).render(pid_area, buf);
     }
 }
 

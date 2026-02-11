@@ -1,7 +1,7 @@
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
 
 use crate::app::{App, AppMode};
-use crate::data::process::SortColumn;
+use crate::data::process::{SortColumn, YankField};
 use crate::ui::dialogs::signal_list;
 use crate::ui::filter_bar::FilterMode;
 
@@ -35,12 +35,29 @@ fn handle_key(app: &mut App, key: KeyEvent) -> bool {
 }
 
 fn handle_normal_key(app: &mut App, key: KeyEvent) -> bool {
-    // Handle pending multi-key sequences (e.g. gg)
+    // Handle pending multi-key sequences (e.g. gg, yy, yp, ...)
     if let Some(pending) = app.pending_key.take() {
         match (pending, key.code) {
             ('g', KeyCode::Char('g')) => {
-                               app.push_jump_mark();
+                app.push_jump_mark();
                 app.select_first();
+                return false;
+            }
+            ('y', KeyCode::Char(c)) => {
+                let field = match c {
+                    'y' => Some(YankField::Row),
+                    'p' => Some(YankField::Pid),
+                    'u' => Some(YankField::User),
+                    'c' => Some(YankField::Container),
+                    'n' => Some(YankField::Name),
+                    'l' => Some(YankField::Cmdline),
+                    _ => None,
+                };
+                if let Some(field) = field {
+                    if let Some(desc) = app.yank(field) {
+                        app.flash(desc);
+                    }
+                }
                 return false;
             }
             _ => { /* cancel pending, fall through to handle current key */ }
@@ -100,6 +117,7 @@ fn handle_normal_key(app: &mut App, key: KeyEvent) -> bool {
         KeyCode::F(9) | KeyCode::Char('x') => {
             if !app.filtered_processes.is_empty() {
                 app.kill_signal_idx = 0;
+                app.kill_pid_scroll = 0;
                 app.pre_kill_mode = AppMode::Normal;
                 app.mode = AppMode::Kill;
             }
@@ -115,6 +133,8 @@ fn handle_normal_key(app: &mut App, key: KeyEvent) -> bool {
 
         // gg / G vim motions
         KeyCode::Char('g') => app.pending_key = Some('g'),
+        // Yank (yy, yp, yu, yc, yn)
+        KeyCode::Char('y') => app.pending_key = Some('y'),
         KeyCode::Char('G') => { app.push_jump_mark(); app.select_last(); }
 
         // Jump forward (Tab = Ctrl+I in terminals)
@@ -192,7 +212,26 @@ fn handle_visual_key(app: &mut App, key: KeyEvent) -> bool {
     if let Some(pending) = app.pending_key.take() {
         match (pending, key.code) {
             ('g', KeyCode::Char('g')) => {
-                               app.select_first();
+                app.select_first();
+                return false;
+            }
+            ('y', KeyCode::Char(c)) => {
+                let field = match c {
+                    'y' => Some(YankField::Row),
+                    'p' => Some(YankField::Pid),
+                    'u' => Some(YankField::User),
+                    'c' => Some(YankField::Container),
+                    'n' => Some(YankField::Name),
+                    'l' => Some(YankField::Cmdline),
+                    _ => None,
+                };
+                if let Some(field) = field {
+                    if let Some(desc) = app.yank(field) {
+                        app.flash(desc);
+                    }
+                    app.visual_anchor = None;
+                    app.mode = AppMode::Normal;
+                }
                 return false;
             }
             _ => { /* cancel pending, fall through */ }
@@ -210,6 +249,9 @@ fn handle_visual_key(app: &mut App, key: KeyEvent) -> bool {
         KeyCode::Char('G') => { app.select_last(); }
         KeyCode::PageUp => { app.move_selection(-(app.visible_rows as i32)); }
         KeyCode::PageDown => { app.move_selection(app.visible_rows as i32); }
+
+        // y alone: yank full rows and exit visual mode
+        KeyCode::Char('y') => app.pending_key = Some('y'),
 
         // Space: tag the visual range and exit visual mode
         KeyCode::Char(' ') => {
@@ -290,6 +332,16 @@ fn handle_kill_key(app: &mut App, key: KeyEvent) -> bool {
             if app.kill_signal_idx < signals.len() - 1 {
                 app.kill_signal_idx += 1;
             }
+        }
+        // Scroll PID list
+        KeyCode::Left | KeyCode::Char('h') => {
+            if app.kill_pid_scroll > 0 {
+                app.kill_pid_scroll -= 1;
+            }
+        }
+        KeyCode::Right | KeyCode::Char('l') => {
+            // Clamped during render; just increment here
+            app.kill_pid_scroll = app.kill_pid_scroll.saturating_add(1);
         }
         KeyCode::Enter => {
             if let Some((sig_num, _)) = signals.get(app.kill_signal_idx) {

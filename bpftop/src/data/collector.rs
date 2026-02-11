@@ -29,11 +29,16 @@ impl Collector {
         // processes already running before tracepoints were attached.
         loader::seed_cmdlines_from_proc(&mut ebpf);
 
+        // Seed CPU stats so the first real collect() gets a meaningful
+        // delta instead of computing against zero (which would show
+        // all CPUs at ~100%).
+        let (prev_cpu_total, prev_cpus) = read_cpu_stats().unwrap_or_default();
+
         Self {
             ebpf,
             cgroup_resolver: CgroupResolver::new(),
-            prev_cpu_total: CpuStats::default(),
-            prev_cpus: Vec::new(),
+            prev_cpu_total,
+            prev_cpus,
             prev_proc_times: HashMap::new(),
             page_size,
         }

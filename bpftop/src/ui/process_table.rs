@@ -125,7 +125,7 @@ impl<'a> ProcessTableWidget<'a> {
         } else if in_visual {
             self.theme.visual_bg
         } else if proc.tagged {
-            self.theme.column_header_bg
+            self.theme.visual_bg
         } else {
             self.theme.bg
         };

@@ -182,6 +182,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "aya",
+ "base64",
  "bollard",
  "bpftop-common",
  "clap",

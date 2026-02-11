@@ -112,6 +112,39 @@ impl ProcessInfo {
     }
 }
 
+/// Which field to yank from a process row.
+#[derive(Debug, Clone, Copy)]
+pub enum YankField {
+    Row,
+    Pid,
+    User,
+    Container,
+    Name,
+    Cmdline,
+}
+
+impl ProcessInfo {
+    /// Format the requested field for clipboard yanking.
+    pub fn yank_text(&self, field: YankField) -> String {
+        match field {
+            YankField::Row => format!(
+                "{}\t{}\t{:.1}\t{:.1}\t{}\t{}",
+                self.pid,
+                self.user,
+                self.cpu_percent,
+                self.mem_percent,
+                format_time(self.cpu_time_secs),
+                self.cmdline,
+            ),
+            YankField::Pid => self.pid.to_string(),
+            YankField::User => self.user.clone(),
+            YankField::Container => self.container.clone().unwrap_or_else(|| "-".to_string()),
+            YankField::Name => self.comm.clone(),
+            YankField::Cmdline => self.cmdline.clone(),
+        }
+    }
+}
+
 /// Column that the process table can be sorted by.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SortColumn {

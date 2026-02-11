@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::io;
 use std::sync::mpsc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use crossterm::event::{self, DisableMouseCapture, EnableMouseCapture};
@@ -14,7 +14,7 @@ use ratatui::Terminal;
 use crate::config::Config;
 use crate::data::collector::Collector;
 use crate::data::process::{
-    compare_processes, matches_filter, ProcessInfo, SortColumn,
+    compare_processes, matches_filter, ProcessInfo, SortColumn, YankField,
 };
 use crate::data::system::SystemInfo;
 use crate::ebpf::loader::EbpfLoader;
@@ -73,6 +73,7 @@ pub struct App {
 
     // Kill dialog
     pub kill_signal_idx: usize,
+    pub kill_pid_scroll: usize,
     pub pre_kill_mode: AppMode,
 
     // Vim multi-key sequences
@@ -84,6 +85,9 @@ pub struct App {
 
     // Visual mode
     pub visual_anchor: Option<usize>,
+
+    // Flash message (transient status bar text)
+    pub flash_message: Option<(String, Instant)>,
 
     // Dynamic header height (set during draw)
     pub header_height: u16,
@@ -141,11 +145,13 @@ impl App {
             active_filter: String::new(),
             user_filter: None,
             kill_signal_idx: 0,
+            kill_pid_scroll: 0,
             pre_kill_mode: AppMode::Normal,
             pending_key: None,
             jump_list: Vec::new(),
             jump_pos: 0,
             visual_anchor: None,
+            flash_message: None,
             header_height: 4,
             dirty: true,
             collector,
@@ -200,6 +206,11 @@ impl App {
             // Drain any available data (use freshest)
             while let Ok((sys_info, processes)) = data_rx.try_recv() {
                 self.merge_data(sys_info, processes);
+            }
+
+            // Expire flash message (forces redraw to clear it)
+            if self.active_flash().is_some() {
+                self.dirty = true;
             }
 
             // Only redraw when something changed
@@ -289,6 +300,7 @@ impl App {
         let status = StatusBarWidget {
             theme: &self.theme,
             ebpf_loaded: self.ebpf_loaded,
+            flash: self.active_flash(),
         };
         frame.render_widget(status, status_area);
 
@@ -299,9 +311,17 @@ impl App {
                 frame.render_widget(help, area);
             }
             AppMode::Kill => {
-                if let Some(proc) = self.filtered_processes.get(self.selected) {
+                let pids: Vec<u32> = if self.filtered_processes.iter().any(|p| p.tagged) {
+                    self.filtered_processes.iter().filter(|p| p.tagged).map(|p| p.pid).collect()
+                } else if let Some(proc) = self.filtered_processes.get(self.selected) {
+                    vec![proc.pid]
+                } else {
+                    vec![]
+                };
+                if !pids.is_empty() {
                     let kill = KillDialog {
-                        pid: proc.pid,
+                        pids: &pids,
+                        pid_scroll: self.kill_pid_scroll,
                         selected_signal: self.kill_signal_idx,
                         theme: &self.theme,
                     };
@@ -544,6 +564,94 @@ impl App {
                 self.update_filtered_processes();
             }
         }
+    }
+
+    // --- Flash message ---
+
+    pub fn flash(&mut self, msg: String) {
+        self.flash_message = Some((msg, Instant::now()));
+    }
+
+    pub fn active_flash(&self) -> Option<&str> {
+        if let Some((ref msg, when)) = self.flash_message {
+            if when.elapsed() < Duration::from_secs(2) {
+                return Some(msg.as_str());
+            }
+        }
+        None
+    }
+
+    // --- Yank to clipboard ---
+
+    /// Yank the given field from the visual range (if active) or current row.
+    /// Returns a description for the flash message.
+    pub fn yank(&mut self, field: YankField) -> Option<String> {
+        let indices: Vec<usize> = if let Some((lo, hi)) = self.visual_range() {
+            (lo..=hi).collect()
+        } else {
+            vec![self.selected]
+        };
+
+        let texts: Vec<String> = indices
+            .iter()
+            .filter_map(|&i| self.filtered_processes.get(i))
+            .map(|p| p.yank_text(field))
+            .collect();
+
+        if texts.is_empty() {
+            return None;
+        }
+
+        let joined = texts.join("\n");
+        if crate::clipboard::yank(&joined).is_err() {
+            return Some("Clipboard write failed".to_string());
+        }
+
+        let desc = match field {
+            YankField::Row => {
+                if texts.len() == 1 {
+                    "Yanked row".to_string()
+                } else {
+                    format!("Yanked {} rows", texts.len())
+                }
+            }
+            YankField::Pid => {
+                if texts.len() == 1 {
+                    format!("Yanked PID {}", texts[0])
+                } else {
+                    format!("Yanked {} PIDs", texts.len())
+                }
+            }
+            YankField::User => {
+                if texts.len() == 1 {
+                    format!("Yanked user {}", texts[0])
+                } else {
+                    format!("Yanked {} users", texts.len())
+                }
+            }
+            YankField::Container => {
+                if texts.len() == 1 {
+                    format!("Yanked container {}", texts[0])
+                } else {
+                    format!("Yanked {} containers", texts.len())
+                }
+            }
+            YankField::Name => {
+                if texts.len() == 1 {
+                    format!("Yanked name {}", texts[0])
+                } else {
+                    format!("Yanked {} names", texts.len())
+                }
+            }
+            YankField::Cmdline => {
+                if texts.len() == 1 {
+                    "Yanked cmdline".to_string()
+                } else {
+                    format!("Yanked {} cmdlines", texts.len())
+                }
+            }
+        };
+        Some(desc)
     }
 
     pub fn cycle_user_filter(&mut self) {
