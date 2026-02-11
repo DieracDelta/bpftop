@@ -22,6 +22,7 @@ pub struct ProcessInfo {
     pub comm: String,
     pub cmdline: String,
     pub container: Option<String>,
+    pub service: Option<String>,
     pub cgroup_path: String,
     /// Children PIDs for tree view.
     pub children: Vec<u32>,
@@ -123,6 +124,7 @@ pub enum YankField {
     Pid,
     User,
     Container,
+    Service,
     Name,
     Cmdline,
     GpuPercent,
@@ -147,6 +149,7 @@ impl ProcessInfo {
             YankField::Pid => self.pid.to_string(),
             YankField::User => self.user.clone(),
             YankField::Container => self.container.clone().unwrap_or_else(|| "-".to_string()),
+            YankField::Service => self.service.clone().unwrap_or_else(|| "-".to_string()),
             YankField::Name => self.comm.clone(),
             YankField::Cmdline => self.cmdline.clone(),
             YankField::GpuPercent => format!("{:.1}", self.gpu_percent),
@@ -172,6 +175,7 @@ pub enum SortColumn {
     GpuMem,
     Time,
     Container,
+    Service,
     Command,
 }
 
@@ -192,6 +196,7 @@ impl SortColumn {
             Self::GpuMem,
             Self::Time,
             Self::Container,
+            Self::Service,
             Self::Command,
         ]
     }
@@ -212,6 +217,7 @@ impl SortColumn {
             Self::GpuMem => "GMEM",
             Self::Time => "TIME+",
             Self::Container => "CONT",
+            Self::Service => "UNIT",
             Self::Command => "Command",
         }
     }
@@ -233,6 +239,7 @@ impl SortColumn {
             Self::GpuMem => 6,
             Self::Time => 10,
             Self::Container => 12,
+            Self::Service => 16,
             Self::Command => 0, // fills remaining space
         }
     }
@@ -263,6 +270,7 @@ pub fn compare_processes(a: &ProcessInfo, b: &ProcessInfo, col: SortColumn, asce
         SortColumn::GpuMem => a.gpu_mem_bytes.cmp(&b.gpu_mem_bytes).then(a.pid.cmp(&b.pid)),
         SortColumn::Time => quantize(a.cpu_time_secs).cmp(&quantize(b.cpu_time_secs)).then(a.pid.cmp(&b.pid)),
         SortColumn::Container => a.container.cmp(&b.container).then(a.pid.cmp(&b.pid)),
+        SortColumn::Service => a.service.cmp(&b.service).then(a.pid.cmp(&b.pid)),
         SortColumn::Command => a.cmdline.cmp(&b.cmdline).then(a.pid.cmp(&b.pid)),
     };
     if ascending { ord } else { ord.reverse() }
@@ -278,6 +286,7 @@ pub fn matches_filter(proc: &ProcessInfo, filter: &str) -> bool {
         || proc.cmdline.to_lowercase().contains(&filter_lower)
         || proc.pid.to_string().contains(filter)
         || proc.user.to_lowercase().contains(&filter_lower)
+        || proc.service.as_deref().map_or(false, |s| s.to_lowercase().contains(&filter_lower))
 }
 
 /// Format bytes into human-readable form (K, M, G).
@@ -332,6 +341,7 @@ mod tests {
             comm: String::from("test"),
             cmdline: String::from("test"),
             container: None,
+            service: None,
             cgroup_path: String::new(),
             children: Vec::new(),
             prev_cpu_ns: 0,

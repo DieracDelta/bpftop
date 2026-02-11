@@ -50,6 +50,7 @@ impl<'a> Widget for HelpDialog<'a> {
             ("yp", "Yank PID"),
             ("yu", "Yank user"),
             ("yc", "Yank container"),
+            ("ys", "Yank service/unit"),
             ("yn", "Yank command name"),
             ("yl", "Yank full cmdline"),
             ("yg", "Yank GPU%"),
@@ -62,6 +63,8 @@ impl<'a> Widget for HelpDialog<'a> {
             ("M", "Sort by MEM%"),
             ("T", "Sort by TIME"),
             ("I", "Invert sort order"),
+            ("S", "Toggle full slice path"),
+            ("A", "Toggle all unit types"),
             ("+ / -", "Expand/Collapse tree node"),
         ];
 

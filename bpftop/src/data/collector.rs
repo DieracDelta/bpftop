@@ -210,6 +210,7 @@ impl Collector {
                 comm,
                 cmdline,
                 container: container.map(|c| c.name),
+                service: None,
                 cgroup_path,
                 children: Vec::new(),
                 prev_cpu_ns: total_cpu_ns,

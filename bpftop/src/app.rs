@@ -13,6 +13,7 @@ use ratatui::Terminal;
 
 use crate::config::Config;
 use crate::data::collector::Collector;
+use crate::data::container::{resolve_service_from_path, ServiceDisplayMode};
 use crate::data::process::{
     compare_processes, matches_filter, ProcessInfo, SortColumn, YankField,
 };
@@ -65,6 +66,9 @@ pub struct App {
 
     // Tree collapse/expand
     pub collapsed_pids: HashSet<u32>,
+
+    // Service display mode
+    pub service_display_mode: ServiceDisplayMode,
 
     // Filter/search
     pub filter_query: String,
@@ -141,6 +145,7 @@ impl App {
             show_threads,
             show_kernel_threads,
             collapsed_pids: HashSet::new(),
+            service_display_mode: ServiceDisplayMode::ServiceOnly,
             filter_query: String::new(),
             active_filter: String::new(),
             user_filter: None,
@@ -271,6 +276,7 @@ impl App {
         // Process table
         self.visible_rows = process_table::visible_rows(table_area);
         let has_container = self.filtered_processes.iter().any(|p| p.container.is_some());
+        let has_service = self.filtered_processes.iter().any(|p| p.service.is_some());
         let table = ProcessTableWidget {
             processes: &self.filtered_processes,
             selected: self.selected,
@@ -279,6 +285,8 @@ impl App {
             sort_ascending: self.sort_ascending,
             theme: &self.theme,
             show_container: has_container,
+            show_service: has_service,
+            service_display_mode: self.service_display_mode,
             show_gpu: has_gpu,
             visual_range: self.visual_range(),
             error_message: self.ebpf_error.as_deref(),
@@ -335,6 +343,17 @@ impl App {
         }
     }
 
+    /// Resolve service names on all processes based on current display mode.
+    pub fn resolve_services(&mut self) {
+        let mode = self.service_display_mode;
+        for p in &mut self.all_processes {
+            p.service = resolve_service_from_path(&p.cgroup_path, mode);
+        }
+        for p in &mut self.filtered_processes {
+            p.service = resolve_service_from_path(&p.cgroup_path, mode);
+        }
+    }
+
     fn merge_data(&mut self, sys_info: SystemInfo, processes: Vec<ProcessInfo>) {
         self.sys_info = sys_info;
 
@@ -355,22 +374,27 @@ impl App {
                 .collect();
 
             self.all_processes = new_map.into_values().collect();
+            let mode = self.service_display_mode;
             for p in &mut self.all_processes {
                 if tagged_pids.contains(&p.pid) {
                     p.tagged = true;
                 }
+                p.service = resolve_service_from_path(&p.cgroup_path, mode);
             }
             self.update_filtered_processes();
         } else {
             // Same PIDs — update values in-place, no re-sort, no tree rebuild
+            let mode = self.service_display_mode;
             for p in &mut self.all_processes {
                 if let Some(np) = new_map.get(&p.pid) {
                     p.update_dynamic_fields(np);
+                    p.service = resolve_service_from_path(&np.cgroup_path, mode);
                 }
             }
             for p in &mut self.filtered_processes {
                 if let Some(np) = new_map.get(&p.pid) {
                     p.update_dynamic_fields(np);
+                    p.service = resolve_service_from_path(&np.cgroup_path, mode);
                 }
             }
         }
@@ -637,6 +661,13 @@ impl App {
                     format!("Yanked container {}", texts[0])
                 } else {
                     format!("Yanked {} containers", texts.len())
+                }
+            }
+            YankField::Service => {
+                if texts.len() == 1 {
+                    format!("Yanked service {}", texts[0])
+                } else {
+                    format!("Yanked {} services", texts.len())
                 }
             }
             YankField::Name => {

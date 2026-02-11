@@ -1,6 +1,12 @@
 # What is this
 
-An eBPF-powered interactive process monitor. Think `top` but using BPF iterators and perf events to get per-process stats with minimal overhead. TUI built with ratatui.
+An eBPF-powered interactive process monitor. Think `htop` but using BPF iterators and perf events to get per-process stats with no crazy per process
+scaling of syscalls. Ratatui TUI. Extra features missing from other process monitors that are implemented:
+
+- Container awareness
+- GPU awareness
+- Systemd service awareness
+- Statically linked target with MUSL so it can be run on any linux machine (assuming the linux is new enough)
 
 ![demo](demo.gif)
 

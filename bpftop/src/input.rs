@@ -1,6 +1,7 @@
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
 
 use crate::app::{App, AppMode};
+use crate::data::container::ServiceDisplayMode;
 use crate::data::process::{SortColumn, YankField};
 use crate::ui::dialogs::signal_list;
 use crate::ui::filter_bar::FilterMode;
@@ -49,6 +50,7 @@ fn handle_normal_key(app: &mut App, key: KeyEvent) -> bool {
                     'p' => Some(YankField::Pid),
                     'u' => Some(YankField::User),
                     'c' => Some(YankField::Container),
+                    's' => Some(YankField::Service),
                     'n' => Some(YankField::Name),
                     'l' => Some(YankField::Cmdline),
                     'g' => Some(YankField::GpuPercent),
@@ -166,6 +168,26 @@ fn handle_normal_key(app: &mut App, key: KeyEvent) -> bool {
             app.update_filtered_processes();
         }
 
+        // Service display mode
+        KeyCode::Char('S') => {
+            app.service_display_mode = if app.service_display_mode == ServiceDisplayMode::FullSlice {
+                ServiceDisplayMode::ServiceOnly
+            } else {
+                ServiceDisplayMode::FullSlice
+            };
+            app.resolve_services();
+            app.update_filtered_processes();
+        }
+        KeyCode::Char('A') => {
+            app.service_display_mode = if app.service_display_mode == ServiceDisplayMode::AllUnits {
+                ServiceDisplayMode::ServiceOnly
+            } else {
+                ServiceDisplayMode::AllUnits
+            };
+            app.resolve_services();
+            app.update_filtered_processes();
+        }
+
         // Quick sort
         KeyCode::Char('P') => {
             app.sort_column = SortColumn::CpuPercent;
@@ -223,6 +245,7 @@ fn handle_visual_key(app: &mut App, key: KeyEvent) -> bool {
                     'p' => Some(YankField::Pid),
                     'u' => Some(YankField::User),
                     'c' => Some(YankField::Container),
+                    's' => Some(YankField::Service),
                     'n' => Some(YankField::Name),
                     'l' => Some(YankField::Cmdline),
                     'g' => Some(YankField::GpuPercent),

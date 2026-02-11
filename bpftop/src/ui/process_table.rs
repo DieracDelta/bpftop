@@ -3,6 +3,7 @@ use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::widgets::Widget;
 
+use crate::data::container::ServiceDisplayMode;
 use crate::data::process::{format_bytes, format_time, ProcessInfo, ProcessState, SortColumn};
 use crate::theme::Theme;
 
@@ -15,6 +16,8 @@ pub struct ProcessTableWidget<'a> {
     pub sort_ascending: bool,
     pub theme: &'a Theme,
     pub show_container: bool,
+    pub show_service: bool,
+    pub service_display_mode: ServiceDisplayMode,
     pub show_gpu: bool,
     pub visual_range: Option<(usize, usize)>,
     pub error_message: Option<&'a str>,
@@ -196,6 +199,14 @@ impl<'a> ProcessTableWidget<'a> {
                     format!("{:<w$}", name)
                 }
             }
+            SortColumn::Service => {
+                let name = proc.service.as_deref().unwrap_or("-");
+                if name.len() > w {
+                    name[..w].to_string()
+                } else {
+                    format!("{:<w$}", name)
+                }
+            }
             SortColumn::Command => {
                 let display = format!("{}{}", proc.tree_prefix, proc.cmdline);
                 if w > 0 && display.len() > w {
@@ -211,9 +222,26 @@ impl<'a> ProcessTableWidget<'a> {
         let mut cols: Vec<(SortColumn, u16)> = SortColumn::all()
             .iter()
             .filter(|c| **c != SortColumn::Container || self.show_container)
+            .filter(|c| **c != SortColumn::Service || self.show_service)
             .filter(|c| (**c != SortColumn::GpuPercent && **c != SortColumn::GpuMem) || self.show_gpu)
             .map(|c| (*c, c.width()))
             .collect();
+
+        // Size UNIT column to fit content, capped per display mode
+        if let Some(entry) = cols.iter_mut().find(|(c, _)| *c == SortColumn::Service) {
+            let max_len = self.processes.iter()
+                .filter_map(|p| p.service.as_deref())
+                .map(|s| s.len())
+                .max()
+                .unwrap_or(4) as u16;
+            let cap = match self.service_display_mode {
+                ServiceDisplayMode::ServiceOnly => 20,
+                ServiceDisplayMode::AllUnits => 28,
+                ServiceDisplayMode::FullSlice => 40,
+            };
+            // At least wide enough for the header label, at most the cap
+            entry.1 = max_len.clamp(5, cap);
+        }
 
         // Calculate remaining width for Command column
         let fixed_width: u16 = cols.iter().filter(|(c, _)| *c != SortColumn::Command).map(|(_, w)| w + 1).sum();

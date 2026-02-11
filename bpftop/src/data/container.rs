@@ -18,6 +18,19 @@ pub enum ContainerRuntime {
     Unknown,
 }
 
+/// Which systemd unit display mode to use for the SERVICE column.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ServiceDisplayMode {
+    /// Show only `.service` unit names, suffix stripped (e.g. `sshd`).
+    ServiceOnly,
+    /// Show the deepest systemd unit of any type (e.g. `sshd.service`, `session-2.scope`).
+    AllUnits,
+    /// Show the full cgroup path (e.g. `system.slice/sshd.service`).
+    FullSlice,
+}
+
+const UNIT_SUFFIXES: &[&str] = &[".service", ".scope", ".slice", ".timer", ".socket"];
+
 /// Resolves cgroup inode IDs to container names.
 ///
 /// BPF provides `cgroup_id` (the inode number of the cgroup directory
@@ -175,6 +188,33 @@ fn extract_scope_id(path: &str, prefix: &str) -> Option<String> {
         }
     }
     None
+}
+
+/// Resolve a systemd unit name from a cgroup path string.
+pub fn resolve_service_from_path(path: &str, mode: ServiceDisplayMode) -> Option<String> {
+    if path.is_empty() {
+        return None;
+    }
+    match mode {
+        ServiceDisplayMode::ServiceOnly => {
+            path.rsplit('/')
+                .find(|seg| seg.ends_with(".service"))
+                .map(|seg| seg.strip_suffix(".service").unwrap().to_string())
+        }
+        ServiceDisplayMode::AllUnits => {
+            path.rsplit('/')
+                .find(|seg| UNIT_SUFFIXES.iter().any(|suf| seg.ends_with(suf)))
+                .map(|seg| seg.to_string())
+        }
+        ServiceDisplayMode::FullSlice => {
+            let trimmed = path.trim_start_matches('/');
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            }
+        }
+    }
 }
 
 fn short_id(id: &str) -> String {
