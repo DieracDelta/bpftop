@@ -8,4 +8,4 @@ default = ["userspace"]
 userspace = ["aya"]
 
 [dependencies]
-aya = { git = "https://github.com/aya-rs/aya", branch = "main", optional = true }
+aya = { workspace = true, optional = true }
