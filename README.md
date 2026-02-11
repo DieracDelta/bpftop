@@ -54,8 +54,6 @@ nix build github:DieracDelta/bpftop#static
 sudo ./result/bin/bpftop
 ```
 
-Without the NixOS module you need sudo (or manually `setcap cap_bpf,cap_perfmon,cap_sys_resource=eip` on the binary).
-
 ## Non-Nix Linux
 
 Grab the static binary from the releases or build it yourself. You need nightly rust, `rust-src`, and `bpf-linker`.
@@ -73,11 +71,16 @@ cargo build --release --bin bpftop
 sudo ./target/release/bpftop
 ```
 
-To avoid sudo, set capabilities on the binary:
+## Avoiding sudo
+
+bpftop needs `cap_bpf`, `cap_perfmon`, and `cap_sys_resource` capabilities. On NixOS, the module handles this automatically via a setcap wrapper. Otherwise, set them manually:
 
 ```bash
+sudo setcap cap_bpf,cap_perfmon,cap_sys_resource=eip ./result/bin/bpftop
+# or on a cargo build:
 sudo setcap cap_bpf,cap_perfmon,cap_sys_resource=eip ./target/release/bpftop
-./bpftop
+
+./bpftop  # no sudo needed
 ```
 
 # Usage
