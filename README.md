@@ -1,15 +1,43 @@
 # What is this
 
-An eBPF-powered interactive process monitor. Think `htop` but using BPF iterators and perf events to get per-process stats with no crazy per process
-scaling of syscalls. Ratatui TUI. Extra features missing from other process monitors that are implemented:
+An eBPF-powered interactive process monitor. Think `htop` but using BPF iterators and perf events to get per-process stats with no per-process syscall scaling. Ratatui TUI.
 
-- Container awareness
-- GPU awareness
-- Systemd service awareness
-- Cgroup v2 freeze/thaw (freeze processes without SIGSTOP)
+- Container awareness (Docker, podman — see which container each process belongs to)
+- GPU awareness (NVIDIA via NVML)
+- Systemd service/unit awareness (see which `.service`, `.slice`, or `.scope` owns a process)
+- Cgroup v2 freeze/thaw (freeze entire services or containers without SIGSTOP)
 - Statically linked target with MUSL so it can be run on any linux machine (assuming the linux is new enough)
 
 ![demo](demo.gif)
+
+# Why not htop?
+
+htop gives you a flat list of processes sorted by CPU or memory. That's fine until you need to answer questions like:
+
+- **"What's eating my CPU?"** — htop shows you 30 individual worker threads. Are they from the same service? The same container? You have to cross-reference PIDs with `systemctl status`, `docker ps`, `cat /proc/PID/cgroup` manually.
+- **"Which container is misbehaving?"** — htop has no concept of containers. You see PIDs and have to mentally map them to container names.
+- **"Which systemd service is responsible?"** — htop shows process names like `python3` or `node`. Useless when you have 15 services all running python. bpftop shows the systemd unit directly in the process table (e.g. `myapp.service`, `docker-abc123.scope`).
+- **"I want to pause this service while I debug something else"** — htop can send SIGSTOP to one process at a time. If the service has 20 worker processes, you're sending 20 signals and hoping nothing forks in between. And SIGSTOP is visible to the process (see below).
+
+bpftop resolves all of this by showing container names, systemd units, and cgroup paths inline. You can filter by user, search by service name, and act on entire cgroups at once.
+
+# Why cgroup freeze over SIGSTOP?
+
+Traditional process monitors (htop, top) pause processes with `SIGSTOP`. This has real problems:
+
+- **Not transparent.** The process can detect it was stopped. Parent processes see `SIGCHLD` with `WIFSTOPPED`. Supervisors like systemd may restart the service or log errors. Monitoring tools flag the state change.
+- **Not atomic across a group.** If a service has 20 processes and you SIGSTOP them one by one, processes can fork new children between signals. You're racing against the workload.
+- **Single-process only.** You have to find and signal every PID individually. Miss one and it keeps running.
+- **SIGCONT from anywhere.** Any process with the right UID can send SIGCONT, accidentally or intentionally unfreezing what you paused.
+
+Cgroup v2 freeze (`cgroup.freeze`) solves all of these:
+
+- **Transparent.** The kernel simply stops scheduling tasks in the cgroup. The processes don't receive a signal — they have no idea they're frozen. No SIGCHLD, no state change visible to the application.
+- **Atomic.** Writing `1` to `cgroup.freeze` freezes every process in the cgroup in one operation. No race window.
+- **Group-level.** Freeze an entire systemd service or container with a single write. Any new processes forked into the cgroup are born frozen.
+- **Controlled.** Only someone with write access to the cgroupfs can thaw. No accidental SIGCONT.
+
+In bpftop: select a process, press `f`, confirm the dialog showing all affected PIDs in that cgroup, done. Press `u` to thaw with confirmation, or `U` to thaw instantly. Frozen processes show up in a distinct color in the process table.
 
 # Disclaimer
 
