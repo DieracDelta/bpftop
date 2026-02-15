@@ -215,9 +215,9 @@
         config = lib.mkIf config.programs.bpftop.enable {
           security.wrappers.bpftop = {
             source = "${self.packages.${pkgs.system}.default}/bin/bpftop";
-            setuid = true;
             owner = "root";
             group = "root";
+            capabilities = "cap_bpf,cap_perfmon,cap_sys_resource,cap_dac_override,cap_sys_admin=eip";
           };
         };
       };

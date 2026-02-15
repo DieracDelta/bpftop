@@ -32,6 +32,7 @@ fn handle_key(app: &mut App, key: KeyEvent) -> bool {
         AppMode::Kill => handle_kill_key(app, key),
         AppMode::SortSelect => handle_sort_key(app, key),
         AppMode::Visual => handle_visual_key(app, key),
+        AppMode::Freeze => handle_freeze_key(app, key),
     }
 }
 
@@ -165,11 +166,28 @@ fn handle_normal_key(app: &mut App, key: KeyEvent) -> bool {
             app.mode = AppMode::Visual;
         }
 
+        // Freeze cgroup
+        KeyCode::Char('f') => {
+            if !app.filtered_processes.is_empty() {
+                app.prepare_freeze();
+            }
+        }
+
         // Tag process
         KeyCode::Char(' ') => app.toggle_tag(),
 
-        // User filter
-        KeyCode::Char('u') => app.cycle_user_filter(),
+        // Thaw cgroup (with dialog)
+        KeyCode::Char('u') => {
+            if !app.filtered_processes.is_empty() {
+                app.prepare_thaw();
+            }
+        }
+        // Instant thaw (no dialog)
+        KeyCode::Char('U') => {
+            if !app.filtered_processes.is_empty() {
+                app.execute_thaw_immediate();
+            }
+        }
 
         // Toggle threads
         KeyCode::Char('H') => {
@@ -322,6 +340,27 @@ fn handle_visual_key(app: &mut App, key: KeyEvent) -> bool {
             app.mode = AppMode::Kill;
         }
 
+        // f: tag the visual range, open freeze dialog
+        KeyCode::Char('f') => {
+            app.tag_visual_range();
+            app.prepare_freeze();
+        }
+
+        // u: tag the visual range, open thaw dialog
+        KeyCode::Char('u') => {
+            app.tag_visual_range();
+            app.prepare_thaw();
+        }
+
+        // U: tag the visual range, instant thaw
+        KeyCode::Char('U') => {
+            app.tag_visual_range();
+            app.execute_thaw_immediate();
+            app.untag_all();
+            app.visual_anchor = None;
+            app.mode = AppMode::Normal;
+        }
+
         _ => {}
     }
     false
@@ -404,6 +443,35 @@ fn handle_kill_key(app: &mut App, key: KeyEvent) -> bool {
             app.untag_all();
             app.visual_anchor = None;
             app.mode = AppMode::Normal;
+        }
+        _ => {}
+    }
+    false
+}
+
+fn handle_freeze_key(app: &mut App, key: KeyEvent) -> bool {
+    match key.code {
+        KeyCode::Esc => {
+            app.untag_all();
+            app.visual_anchor = None;
+            app.mode = app.pre_freeze_mode;
+        }
+        KeyCode::Enter => {
+            if app.freeze_is_thaw {
+                app.execute_thaw();
+            } else {
+                app.execute_freeze();
+            }
+            app.untag_all();
+            app.visual_anchor = None;
+            app.mode = AppMode::Normal;
+        }
+        // Scroll PID list
+        KeyCode::Down | KeyCode::Char('j') => {
+            app.freeze_scroll = app.freeze_scroll.saturating_add(1);
+        }
+        KeyCode::Up | KeyCode::Char('k') => {
+            app.freeze_scroll = app.freeze_scroll.saturating_sub(1);
         }
         _ => {}
     }

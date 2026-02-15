@@ -4,6 +4,7 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Widget, Wrap};
 
+use crate::app::FreezeTarget;
 use crate::theme::Theme;
 
 /// Help overlay showing all keybindings.
@@ -40,6 +41,8 @@ impl<'a> Widget for HelpDialog<'a> {
             ("t", "Toggle tree view"),
             ("> <", "Sort column select"),
             ("x", "Kill process (send signal)"),
+            ("f", "Freeze cgroup"),
+            ("u / U", "Thaw (dialog / instant)"),
             ("j / k", "Navigate down / up"),
             ("gg", "Jump to top"),
             ("G", "Jump to bottom"),
@@ -56,7 +59,6 @@ impl<'a> Widget for HelpDialog<'a> {
             ("yg", "Yank GPU%"),
             ("yv", "Yank VRAM usage"),
             ("Space", "Tag process"),
-            ("u", "Filter by user"),
             ("H", "Toggle user threads"),
             ("K", "Toggle kernel threads"),
             ("P", "Sort by CPU%"),
@@ -191,6 +193,118 @@ impl<'a> Widget for KillDialog<'a> {
         }
 
         Paragraph::new(pid_lines).render(pid_area, buf);
+    }
+}
+
+/// Freeze/thaw confirmation dialog.
+pub struct FreezeDialog<'a> {
+    pub targets: &'a [FreezeTarget],
+    pub is_thaw: bool,
+    pub scroll: usize,
+    pub theme: &'a Theme,
+}
+
+impl<'a> Widget for FreezeDialog<'a> {
+    fn render(self, area: Rect, buf: &mut Buffer) {
+        let dialog = centered_rect(55, 50, area);
+        Clear.render(dialog, buf);
+
+        // Build title based on targets
+        let title = if self.targets.len() == 1 {
+            let t = &self.targets[0];
+            let action = if self.is_thaw { "Thaw" } else { "Freeze" };
+            if t.is_root && !self.is_thaw {
+                format!(" Create cgroup and freeze PID {} ", t.pids.first().unwrap_or(&0))
+            } else {
+                format!(" {action} cgroup {} ", t.cgroup_path)
+            }
+        } else {
+            let action = if self.is_thaw { "Thaw" } else { "Freeze" };
+            format!(" {action} {} cgroups ", self.targets.len())
+        };
+
+        let block = Block::default()
+            .title(title)
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(self.theme.border))
+            .style(Style::default().bg(self.theme.bg));
+
+        let inner = block.inner(dialog);
+        block.render(dialog, buf);
+
+        let pid_style = Style::default()
+            .fg(self.theme.status_key)
+            .add_modifier(Modifier::BOLD);
+        let label_style = Style::default()
+            .fg(self.theme.fg)
+            .add_modifier(Modifier::BOLD);
+        let dim_style = Style::default().fg(self.theme.border);
+        let footer_style = Style::default().fg(self.theme.fg);
+
+        // Build lines: for each target, show cgroup path header then PIDs
+        let mut all_lines: Vec<Line> = Vec::new();
+        for target in self.targets {
+            if self.targets.len() > 1 {
+                all_lines.push(Line::styled(
+                    format!("  {}", target.cgroup_path),
+                    label_style,
+                ));
+            }
+            let total = target.pids.len();
+            all_lines.push(Line::styled(
+                format!("  {} process(es) affected:", total),
+                dim_style,
+            ));
+            for pid in &target.pids {
+                all_lines.push(Line::styled(format!("    {pid}"), pid_style));
+            }
+        }
+
+        // Reserve 2 rows for footer
+        let content_height = inner.height.saturating_sub(2) as usize;
+        let total_lines = all_lines.len();
+        let scroll = self.scroll.min(total_lines.saturating_sub(content_height));
+
+        let visible_lines: Vec<Line> = all_lines
+            .into_iter()
+            .skip(scroll)
+            .take(content_height)
+            .collect();
+
+        let content_area = Rect {
+            height: inner.height.saturating_sub(2),
+            ..inner
+        };
+        Paragraph::new(visible_lines).render(content_area, buf);
+
+        // Scroll indicator
+        if total_lines > content_height {
+            let showing_end = (scroll + content_height).min(total_lines);
+            let indicator = Line::styled(
+                format!("  j/k {}-{}/{}", scroll + 1, showing_end, total_lines),
+                dim_style,
+            );
+            let indicator_area = Rect {
+                y: inner.y + inner.height.saturating_sub(2),
+                height: 1,
+                ..inner
+            };
+            Paragraph::new(vec![indicator]).render(indicator_area, buf);
+        }
+
+        // Footer: [Enter] Confirm  [Esc] Cancel
+        let footer = Line::from(vec![
+            Span::styled("[Enter]", pid_style),
+            Span::styled(" Confirm  ", footer_style),
+            Span::styled("[Esc]", pid_style),
+            Span::styled(" Cancel", footer_style),
+        ]);
+        let footer_area = Rect {
+            y: inner.y + inner.height.saturating_sub(1),
+            height: 1,
+            ..inner
+        };
+        Paragraph::new(vec![footer]).render(footer_area, buf);
     }
 }
 

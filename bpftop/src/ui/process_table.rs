@@ -134,6 +134,8 @@ impl<'a> ProcessTableWidget<'a> {
 
         let fg = if selected {
             self.theme.selection_fg
+        } else if proc.frozen {
+            self.theme.proc_frozen
         } else {
             match proc.state {
                 ProcessState::Running => self.theme.proc_running,

@@ -39,6 +39,8 @@ pub struct ProcessInfo {
     pub tid: u32,
     /// Tagged by user (space key).
     pub tagged: bool,
+    /// Whether this process's cgroup is currently frozen.
+    pub frozen: bool,
     /// Tree view prefix (e.g. "├─- ") set during tree ordering.
     pub tree_prefix: String,
 }
@@ -119,6 +121,7 @@ impl ProcessInfo {
         self.cmdline = src.cmdline.clone();
         self.children = src.children.clone();
         self.prev_cpu_ns = src.prev_cpu_ns;
+        self.frozen = src.frozen;
     }
 }
 
@@ -354,6 +357,7 @@ mod tests {
             is_thread: false,
             tid: pid,
             tagged: false,
+            frozen: false,
             tree_prefix: String::new(),
         }
     }

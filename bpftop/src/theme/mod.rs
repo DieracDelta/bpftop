@@ -35,6 +35,7 @@ pub struct Theme {
     pub proc_sleeping: Color,
     pub proc_zombie: Color,
     pub proc_stopped: Color,
+    pub proc_frozen: Color,
 
     // Status bar
     pub status_bg: Color,

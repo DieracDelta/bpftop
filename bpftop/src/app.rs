@@ -12,6 +12,7 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 
 use crate::config::Config;
+use crate::data::cgroup_control;
 use crate::data::collector::Collector;
 use crate::data::container::{resolve_service_from_path, ServiceDisplayMode};
 use crate::data::process::{
@@ -21,7 +22,7 @@ use crate::data::system::SystemInfo;
 use crate::ebpf::loader::EbpfLoader;
 use crate::input;
 use crate::theme::Theme;
-use crate::ui::dialogs::{HelpDialog, KillDialog};
+use crate::ui::dialogs::{FreezeDialog, HelpDialog, KillDialog};
 use crate::ui::filter_bar::{FilterBarWidget, FilterMode};
 use crate::ui::header::HeaderWidget;
 use crate::ui::layout::main_layout;
@@ -39,6 +40,15 @@ pub enum AppMode {
     Kill,
     SortSelect,
     Visual,
+    Freeze,
+}
+
+/// A cgroup targeted for freeze/thaw, with the PIDs it contains.
+#[derive(Debug, Clone)]
+pub struct FreezeTarget {
+    pub cgroup_path: String,
+    pub pids: Vec<u32>,
+    pub is_root: bool,
 }
 
 /// Main application state.
@@ -79,6 +89,12 @@ pub struct App {
     pub kill_signal_idx: usize,
     pub kill_pid_scroll: usize,
     pub pre_kill_mode: AppMode,
+
+    // Freeze/thaw dialog
+    pub freeze_targets: Vec<FreezeTarget>,
+    pub freeze_is_thaw: bool,
+    pub pre_freeze_mode: AppMode,
+    pub freeze_scroll: usize,
 
     // Vim multi-key sequences
     pub pending_key: Option<char>,
@@ -152,6 +168,10 @@ impl App {
             kill_signal_idx: 0,
             kill_pid_scroll: 0,
             pre_kill_mode: AppMode::Normal,
+            freeze_targets: Vec::new(),
+            freeze_is_thaw: false,
+            pre_freeze_mode: AppMode::Normal,
+            freeze_scroll: 0,
             pending_key: None,
             jump_list: Vec::new(),
             jump_pos: 0,
@@ -337,6 +357,17 @@ impl App {
                         theme: &self.theme,
                     };
                     frame.render_widget(kill, area);
+                }
+            }
+            AppMode::Freeze => {
+                if !self.freeze_targets.is_empty() {
+                    let dialog = FreezeDialog {
+                        targets: &self.freeze_targets,
+                        is_thaw: self.freeze_is_thaw,
+                        scroll: self.freeze_scroll,
+                        theme: &self.theme,
+                    };
+                    frame.render_widget(dialog, area);
                 }
             }
             _ => {}
@@ -795,6 +826,7 @@ impl App {
         Some(desc)
     }
 
+    #[allow(dead_code)]
     pub fn cycle_user_filter(&mut self) {
         if self.user_filter.is_some() {
             self.user_filter = None;
@@ -830,6 +862,158 @@ impl App {
         }
     }
 
+    // --- Freeze/thaw ---
+
+    /// Gather selected/tagged processes, group by cgroup, populate freeze_targets, enter Freeze mode.
+    pub fn prepare_freeze(&mut self) {
+        let procs = self.target_processes();
+        if procs.is_empty() {
+            return;
+        }
+
+        let targets = self.build_freeze_targets(&procs);
+        if targets.is_empty() {
+            self.flash("No freezable cgroups found".to_string());
+            return;
+        }
+
+        self.freeze_targets = targets;
+        self.freeze_is_thaw = false;
+        self.freeze_scroll = 0;
+        self.pre_freeze_mode = self.mode;
+        self.mode = AppMode::Freeze;
+    }
+
+    /// Gather selected/tagged processes, group by cgroup (only frozen ones), enter Freeze mode for thaw.
+    pub fn prepare_thaw(&mut self) {
+        let procs = self.target_processes();
+        if procs.is_empty() {
+            return;
+        }
+
+        let targets: Vec<FreezeTarget> = self
+            .build_freeze_targets(&procs)
+            .into_iter()
+            .filter(|t| cgroup_control::is_frozen(&t.cgroup_path))
+            .collect();
+
+        if targets.is_empty() {
+            self.flash("No frozen cgroups found".to_string());
+            return;
+        }
+
+        self.freeze_targets = targets;
+        self.freeze_is_thaw = true;
+        self.freeze_scroll = 0;
+        self.pre_freeze_mode = self.mode;
+        self.mode = AppMode::Freeze;
+    }
+
+    /// Execute freeze on all targets (called on Enter in freeze dialog).
+    pub fn execute_freeze(&mut self) {
+        for target in &mut self.freeze_targets {
+            if target.is_root {
+                // Create bpftop-managed cgroup and move the single PID there
+                if let Some(&pid) = target.pids.first() {
+                    match cgroup_control::create_and_move(pid) {
+                        Ok(new_path) => {
+                            target.cgroup_path = new_path;
+                        }
+                        Err(e) => {
+                            self.flash(format!("Failed to create cgroup for PID {pid}: {e}"));
+                            return;
+                        }
+                    }
+                }
+            }
+            if let Err(e) = cgroup_control::freeze_cgroup(&target.cgroup_path) {
+                self.flash(format!("Freeze failed: {e}"));
+                return;
+            }
+        }
+        let count: usize = self.freeze_targets.iter().map(|t| t.pids.len()).sum();
+        self.flash(format!("Frozen {count} process(es)"));
+    }
+
+    /// Execute thaw on all targets (called on Enter in thaw dialog).
+    pub fn execute_thaw(&mut self) {
+        for target in &self.freeze_targets {
+            if let Err(e) = cgroup_control::thaw_cgroup(&target.cgroup_path) {
+                self.flash(format!("Thaw failed: {e}"));
+                return;
+            }
+        }
+        let count: usize = self.freeze_targets.iter().map(|t| t.pids.len()).sum();
+        self.flash(format!("Thawed {count} process(es)"));
+    }
+
+    /// Instantly thaw the cgroups of selected/tagged processes without a dialog.
+    pub fn execute_thaw_immediate(&mut self) {
+        let procs = self.target_processes();
+        if procs.is_empty() {
+            return;
+        }
+
+        let targets = self.build_freeze_targets(&procs);
+        let mut thawed = 0usize;
+        for target in &targets {
+            if cgroup_control::is_frozen(&target.cgroup_path) {
+                if let Err(e) = cgroup_control::thaw_cgroup(&target.cgroup_path) {
+                    self.flash(format!("Thaw failed: {e}"));
+                    return;
+                }
+                thawed += target.pids.len();
+            }
+        }
+        if thawed > 0 {
+            self.flash(format!("Thawed {thawed} process(es)"));
+        }
+    }
+
+    /// Get the processes to operate on: tagged processes, or the single selected process.
+    fn target_processes(&self) -> Vec<(u32, String)> {
+        if self.filtered_processes.iter().any(|p| p.tagged) {
+            self.filtered_processes
+                .iter()
+                .filter(|p| p.tagged)
+                .map(|p| (p.pid, p.cgroup_path.clone()))
+                .collect()
+        } else if let Some(proc) = self.filtered_processes.get(self.selected) {
+            vec![(proc.pid, proc.cgroup_path.clone())]
+        } else {
+            vec![]
+        }
+    }
+
+    /// Group processes by cgroup path, reading cgroup.procs for each unique cgroup.
+    fn build_freeze_targets(&self, procs: &[(u32, String)]) -> Vec<FreezeTarget> {
+        let mut seen = HashMap::<String, FreezeTarget>::new();
+        for (pid, cgroup_path) in procs {
+            if let std::collections::hash_map::Entry::Vacant(e) = seen.entry(cgroup_path.clone()) {
+                let is_root = cgroup_path == "/";
+                let pids = if is_root {
+                    // For root cgroup, only include the specific PID (not all root cgroup procs)
+                    vec![*pid]
+                } else {
+                    cgroup_control::read_cgroup_pids(cgroup_path).unwrap_or_else(|_| vec![*pid])
+                };
+                e.insert(FreezeTarget {
+                    cgroup_path: cgroup_path.clone(),
+                    pids,
+                    is_root,
+                });
+            } else if is_root_cgroup(cgroup_path) {
+                // For root cgroup, add this PID to the existing target
+                if let Some(target) = seen.get_mut(cgroup_path) {
+                    if !target.pids.contains(pid) {
+                        target.pids.push(*pid);
+                    }
+                }
+            }
+        }
+        seen.into_values().collect()
+    }
+
     fn adjust_scroll(&mut self) {
         if self.visible_rows == 0 {
             return;
@@ -841,4 +1025,8 @@ impl App {
             self.scroll_offset = self.selected - self.visible_rows + 1;
         }
     }
+}
+
+fn is_root_cgroup(path: &str) -> bool {
+    path == "/"
 }

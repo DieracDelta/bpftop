@@ -2,6 +2,7 @@ use std::collections::HashMap;
 
 use anyhow::Result;
 
+use super::cgroup_control;
 use super::container::CgroupResolver;
 #[cfg(feature = "gpu")]
 use super::gpu::GpuCollector;
@@ -115,6 +116,9 @@ impl Collector {
         let mut running = 0u32;
         let mut sleeping = 0u32;
 
+        // Cache frozen state per unique cgroup to avoid redundant reads
+        let mut frozen_cache = HashMap::<String, bool>::new();
+
         // Total CPU ticks delta for percentage calculation
         let total_sys_delta = cpu_total
             .total_ticks()
@@ -190,6 +194,11 @@ impl Collector {
             let cgroup_path = self.cgroup_resolver.resolve_path(task.cgroup_id);
             let container = self.cgroup_resolver.resolve(task.cgroup_id);
 
+            // Check frozen state (cached per cgroup)
+            let frozen = *frozen_cache
+                .entry(cgroup_path.clone())
+                .or_insert_with(|| cgroup_control::is_frozen(&cgroup_path));
+
             processes.push(ProcessInfo {
                 pid: task.pid,
                 ppid: task.ppid,
@@ -218,6 +227,7 @@ impl Collector {
                 is_thread: false,
                 tid: task.pid,
                 tagged: false,
+                frozen,
                 tree_prefix: String::new(),
             });
         }

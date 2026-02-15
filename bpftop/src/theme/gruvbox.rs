@@ -29,6 +29,7 @@ pub fn dark() -> Theme {
         proc_sleeping: DARK_FG,
         proc_zombie: BR_RED,
         proc_stopped: BR_YELLOW,
+        proc_frozen: BR_BLUE,
 
         // Status bar
         status_bg: DARK_BG2,
@@ -72,6 +73,7 @@ pub fn light() -> Theme {
         proc_sleeping: LIGHT_FG,
         proc_zombie: RED,
         proc_stopped: YELLOW,
+        proc_frozen: BLUE,
 
         // Status bar
         status_bg: LIGHT_BG2,

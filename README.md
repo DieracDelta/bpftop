@@ -6,6 +6,7 @@ scaling of syscalls. Ratatui TUI. Extra features missing from other process moni
 - Container awareness
 - GPU awareness
 - Systemd service awareness
+- Cgroup v2 freeze/thaw (freeze processes without SIGSTOP)
 - Statically linked target with MUSL so it can be run on any linux machine (assuming the linux is new enough)
 
 ![demo](demo.gif)
@@ -20,7 +21,7 @@ There's a nix flake. Two package outputs: dynamically linked (default) and a ful
 
 ## NixOS
 
-Add the flake input and enable the module. This installs bpftop with Linux capabilities (`cap_bpf`, `cap_perfmon`, `cap_sys_resource`) so it runs without sudo.
+Add the flake input and enable the module. This installs bpftop with Linux capabilities (`cap_bpf`, `cap_perfmon`, `cap_sys_resource`, `cap_dac_override`, `cap_sys_admin`) so it runs without sudo.
 
 ```nix
 # flake.nix
@@ -73,14 +74,17 @@ sudo ./target/release/bpftop
 
 ## Avoiding sudo
 
-bpftop needs `cap_bpf`, `cap_perfmon`, and `cap_sys_resource` capabilities. On NixOS, the module handles this automatically via a setcap wrapper. Otherwise, set them manually:
+bpftop needs `cap_bpf`, `cap_perfmon`, and `cap_sys_resource` capabilities for core functionality. On NixOS, the module handles this automatically. Otherwise, set them manually:
 
 ```bash
-sudo setcap cap_bpf,cap_perfmon,cap_sys_resource=eip ./result/bin/bpftop
-# or on a cargo build:
 sudo setcap cap_bpf,cap_perfmon,cap_sys_resource=eip ./target/release/bpftop
-
 ./bpftop  # no sudo needed
+```
+
+The cgroup freeze/thaw feature (`f`/`u`/`U` keys) additionally requires `cap_dac_override` and `cap_sys_admin` to write to cgroupfs files and migrate processes between cgroups. The NixOS module includes these. For manual setcap:
+
+```bash
+sudo setcap cap_bpf,cap_perfmon,cap_sys_resource,cap_dac_override,cap_sys_admin=eip ./target/release/bpftop
 ```
 
 # Usage
