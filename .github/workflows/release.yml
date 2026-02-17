@@ -1,0 +1,48 @@
+name: Release
+on:
+  push:
+    branches: [master]
+
+concurrency:
+  group: release
+  cancel-in-progress: true
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - arch: x86_64-linux
+            runner: ubuntu-latest
+            artifact: bpftop-x86_64-linux
+          - arch: aarch64-linux
+            runner: ubuntu-24.04-arm
+            artifact: bpftop-aarch64-linux
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: DeterminateSystems/nix-installer-action@main
+      - run: nix build .#packages.${{ matrix.arch }}.static
+      - run: cp result/bin/bpftop ${{ matrix.artifact }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.artifact }}
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: latest
+          name: Latest Build
+          body: "Built from ${{ github.sha }}"
+          prerelease: true
+          files: |
+            bpftop-x86_64-linux/bpftop-x86_64-linux
+            bpftop-aarch64-linux/bpftop-aarch64-linux
+          make_latest: true

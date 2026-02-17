@@ -149,7 +149,18 @@
               '';
             } // env);
 
-          muslCC = pkgs.pkgsCross.musl64.stdenv.cc;
+          muslTarget = {
+            "x86_64-linux" = "x86_64-unknown-linux-musl";
+            "aarch64-linux" = "aarch64-unknown-linux-musl";
+          }.${system};
+
+          muslCC = {
+            "x86_64-linux" = pkgs.pkgsCross.musl64.stdenv.cc;
+            "aarch64-linux" = pkgs.pkgsCross.aarch64-multiplatform-musl.stdenv.cc;
+          }.${system};
+
+          cargoTargetEnvVar =
+            "CARGO_TARGET_${builtins.replaceStrings ["-"] ["_"] (pkgs.lib.toUpper muslTarget)}_LINKER";
 
         in {
           default = mkBpftop {
@@ -161,12 +172,12 @@
             pname = "bpftop-static";
             rustToolchain = pkgs.rust-bin.nightly.latest.default.override {
               extensions = [ "rust-src" ];
-              targets = [ "x86_64-unknown-linux-musl" ];
+              targets = [ muslTarget ];
             };
-            cargoTarget = "x86_64-unknown-linux-musl";
+            cargoTarget = muslTarget;
             extraNativeBuildInputs = [ muslCC ];
             env = {
-              CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER = "${muslCC}/bin/x86_64-unknown-linux-musl-cc";
+              ${cargoTargetEnvVar} = "${muslCC}/bin/${muslTarget}-cc";
             };
           };
         }
