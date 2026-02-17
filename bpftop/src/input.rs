@@ -45,6 +45,10 @@ fn handle_normal_key(app: &mut App, key: KeyEvent) -> bool {
                 app.select_first();
                 return false;
             }
+            ('g', KeyCode::Char('G')) => {
+                app.show_gpu = !app.show_gpu;
+                return false;
+            }
             ('y', KeyCode::Char(c)) => {
                 let field = match c {
                     'y' => Some(YankField::Row),
@@ -241,9 +245,31 @@ fn handle_normal_key(app: &mut App, key: KeyEvent) -> bool {
             app.update_filtered_processes();
         }
         KeyCode::Char('N') => {
-            app.sort_column = SortColumn::GpuPercent;
-            app.sort_ascending = false;
-
+            if !app.show_net {
+                app.show_net = true;
+                app.sort_column = SortColumn::NetRate;
+                app.sort_ascending = false;
+            } else {
+                match app.sort_column {
+                    SortColumn::NetRate => {
+                        app.sort_column = SortColumn::NetTotal;
+                        app.sort_ascending = false;
+                    }
+                    SortColumn::NetTotal => {
+                        app.sort_column = SortColumn::NetIf;
+                        app.sort_ascending = true;
+                    }
+                    SortColumn::NetIf => {
+                        app.show_net = false;
+                        app.sort_column = SortColumn::CpuPercent;
+                        app.sort_ascending = false;
+                    }
+                    _ => {
+                        app.sort_column = SortColumn::NetRate;
+                        app.sort_ascending = false;
+                    }
+                }
+            }
             app.update_filtered_processes();
         }
         KeyCode::Char('W') => {

@@ -1,12 +1,14 @@
 use std::fs;
 use std::io::Read;
 
+use std::collections::HashMap;
+
 use anyhow::{Context, Result};
 use aya::maps::HashMap as BpfHashMap;
 use aya::programs::iter::{Iter, IterLink};
-use aya::programs::TracePoint;
+use aya::programs::{KProbe, TracePoint};
 use aya::{Btf, Ebpf};
-use bpftop_common::{CmdlineEvent, TaskInfo};
+use bpftop_common::{CmdlineEvent, NetStats, TaskInfo};
 
 /// The compiled eBPF object. Built by xtask (cargo xtask build-ebpf)
 /// before the userspace crate is compiled.
@@ -63,6 +65,36 @@ impl EbpfLoader {
         exit_prog
             .attach("sched", "sched_process_exit")
             .context("attaching cleanup_cmdline")?;
+
+        // Load and attach network kprobes/kretprobes
+        for (prog_name, func_name) in &[
+            ("kprobe_tcp_sendmsg", "tcp_sendmsg"),
+            ("kprobe_udp_sendmsg", "udp_sendmsg"),
+            ("kprobe_tcp_recvmsg", "tcp_recvmsg"),
+            ("kprobe_udp_recvmsg", "udp_recvmsg"),
+        ] {
+            let prog: &mut KProbe = bpf
+                .program_mut(prog_name)
+                .context(format!("{prog_name} not found"))?
+                .try_into()
+                .context(format!("{prog_name} is not a KProbe"))?;
+            prog.load().context(format!("loading {prog_name}"))?;
+            prog.attach(func_name, 0)
+                .context(format!("attaching {prog_name}"))?;
+        }
+        for (prog_name, func_name) in &[
+            ("kretprobe_tcp_recvmsg", "tcp_recvmsg"),
+            ("kretprobe_udp_recvmsg", "udp_recvmsg"),
+        ] {
+            let prog: &mut KProbe = bpf
+                .program_mut(prog_name)
+                .context(format!("{prog_name} not found"))?
+                .try_into()
+                .context(format!("{prog_name} is not a KProbe"))?;
+            prog.load().context(format!("loading {prog_name}"))?;
+            prog.attach(func_name, 0)
+                .context(format!("attaching {prog_name}"))?;
+        }
 
         Ok(Self { bpf: Some(bpf) })
     }
@@ -132,6 +164,30 @@ impl EbpfLoader {
         } else {
             Some(s)
         }
+    }
+
+    /// Read per-PID network stats from the BPF NET_STATS map.
+    /// Returns a map of pid -> (tx_bytes, rx_bytes, ifindex).
+    pub fn read_net_stats(&self) -> HashMap<u32, (u64, u64, u32)> {
+        let mut result = HashMap::new();
+        let bpf = match self.bpf.as_ref() {
+            Some(b) => b,
+            None => return result,
+        };
+        let map = match bpf.map("NET_STATS") {
+            Some(m) => m,
+            None => return result,
+        };
+        let hash = match BpfHashMap::<_, u32, NetStats>::try_from(map) {
+            Ok(h) => h,
+            Err(_) => return result,
+        };
+        for item in hash.iter() {
+            if let Ok((pid, stats)) = item {
+                result.insert(pid, (stats.tx_bytes, stats.rx_bytes, stats.ifindex));
+            }
+        }
+        result
     }
 
     /// Insert a cmdline entry into the BPF map (used for startup seeding).

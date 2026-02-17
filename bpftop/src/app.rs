@@ -77,6 +77,10 @@ pub struct App {
     // Tree collapse/expand
     pub collapsed_pids: HashSet<u32>,
 
+    // Column toggles
+    pub show_net: bool,
+    pub show_gpu: bool,
+
     // Service display mode
     pub service_display_mode: ServiceDisplayMode,
 
@@ -161,6 +165,8 @@ impl App {
             show_threads,
             show_kernel_threads,
             collapsed_pids: HashSet::new(),
+            show_net: false,
+            show_gpu: true,
             service_display_mode: ServiceDisplayMode::ServiceOnly,
             filter_query: String::new(),
             active_filter: String::new(),
@@ -307,7 +313,8 @@ impl App {
             show_container: has_container,
             show_service: has_service,
             service_display_mode: self.service_display_mode,
-            show_gpu: has_gpu,
+            show_gpu: self.show_gpu && has_gpu,
+            show_net: self.show_net,
             visual_range: self.visual_range(),
             error_message: self.ebpf_error.as_deref(),
         };

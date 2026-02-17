@@ -4,7 +4,7 @@ use ratatui::style::{Modifier, Style};
 use ratatui::widgets::Widget;
 
 use crate::data::container::ServiceDisplayMode;
-use crate::data::process::{format_bytes, format_time, ProcessInfo, ProcessState, SortColumn};
+use crate::data::process::{format_bytes, format_rate, format_time, ProcessInfo, ProcessState, SortColumn};
 use crate::theme::Theme;
 
 /// Renders the scrollable, sortable process table.
@@ -19,6 +19,7 @@ pub struct ProcessTableWidget<'a> {
     pub show_service: bool,
     pub service_display_mode: ServiceDisplayMode,
     pub show_gpu: bool,
+    pub show_net: bool,
     pub visual_range: Option<(usize, usize)>,
     pub error_message: Option<&'a str>,
 }
@@ -187,6 +188,35 @@ impl<'a> ProcessTableWidget<'a> {
             SortColumn::MemPercent => format!("{:>w$.1}", proc.mem_percent),
             SortColumn::GpuPercent => format!("{:>w$.1}", proc.gpu_percent),
             SortColumn::GpuMem => format!("{:>w$}", format_bytes(proc.gpu_mem_bytes)),
+            SortColumn::NetRate => {
+                let total = proc.net_tx_bytes + proc.net_rx_bytes;
+                if total == 0 {
+                    format!("{:>w$}", "-")
+                } else {
+                    format!("{:>w$}", format_rate(proc.net_rate))
+                }
+            }
+            SortColumn::NetTotal => {
+                let total = proc.net_tx_bytes + proc.net_rx_bytes;
+                if total == 0 {
+                    format!("{:>w$}", "-")
+                } else {
+                    format!("{:>w$}", format_bytes(total))
+                }
+            }
+            SortColumn::NetIf => {
+                let total = proc.net_tx_bytes + proc.net_rx_bytes;
+                if total == 0 {
+                    format!("{:<w$}", "-")
+                } else {
+                    let name = &proc.net_ifname;
+                    if name.len() > w {
+                        name[..w].to_string()
+                    } else {
+                        format!("{:<w$}", name)
+                    }
+                }
+            }
             SortColumn::Time => {
                 let t = format_time(proc.cpu_time_secs);
                 format!("{:>w$}", t)
@@ -224,6 +254,7 @@ impl<'a> ProcessTableWidget<'a> {
             .filter(|c| **c != SortColumn::Container || self.show_container)
             .filter(|c| **c != SortColumn::Service || self.show_service)
             .filter(|c| (**c != SortColumn::GpuPercent && **c != SortColumn::GpuMem) || self.show_gpu)
+            .filter(|c| !matches!(**c, SortColumn::NetRate | SortColumn::NetTotal | SortColumn::NetIf) || self.show_net)
             .map(|c| (*c, c.width()))
             .collect();
 

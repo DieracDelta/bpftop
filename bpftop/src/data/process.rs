@@ -18,6 +18,10 @@ pub struct ProcessInfo {
     pub mem_percent: f64,
     pub gpu_percent: f64,
     pub gpu_mem_bytes: u64,
+    pub net_rx_bytes: u64,
+    pub net_tx_bytes: u64,
+    pub net_rate: f64,
+    pub net_ifname: String,
     pub cpu_time_secs: f64,
     #[allow(dead_code)]
     pub start_time_ns: u64,
@@ -116,6 +120,10 @@ impl ProcessInfo {
         self.mem_percent = src.mem_percent;
         self.gpu_percent = src.gpu_percent;
         self.gpu_mem_bytes = src.gpu_mem_bytes;
+        self.net_rx_bytes = src.net_rx_bytes;
+        self.net_tx_bytes = src.net_tx_bytes;
+        self.net_rate = src.net_rate;
+        self.net_ifname = src.net_ifname.clone();
         self.cpu_time_secs = src.cpu_time_secs;
         self.comm = src.comm.clone();
         self.cmdline = src.cmdline.clone();
@@ -181,6 +189,9 @@ pub enum SortColumn {
     MemPercent,
     GpuPercent,
     GpuMem,
+    NetRate,
+    NetTotal,
+    NetIf,
     Time,
     Container,
     Service,
@@ -202,6 +213,9 @@ impl SortColumn {
             Self::MemPercent,
             Self::GpuPercent,
             Self::GpuMem,
+            Self::NetRate,
+            Self::NetTotal,
+            Self::NetIf,
             Self::Time,
             Self::Container,
             Self::Service,
@@ -223,6 +237,9 @@ impl SortColumn {
             Self::MemPercent => "MEM%",
             Self::GpuPercent => "GPU%",
             Self::GpuMem => "GMEM",
+            Self::NetRate => "NET/s",
+            Self::NetTotal => "NET TOT",
+            Self::NetIf => "IF",
             Self::Time => "TIME+",
             Self::Container => "CONT",
             Self::Service => "UNIT",
@@ -245,6 +262,9 @@ impl SortColumn {
             Self::MemPercent => 6,
             Self::GpuPercent => 5,
             Self::GpuMem => 6,
+            Self::NetRate => 8,
+            Self::NetTotal => 7,
+            Self::NetIf => 6,
             Self::Time => 10,
             Self::Container => 12,
             Self::Service => 16,
@@ -276,6 +296,9 @@ pub fn compare_processes(a: &ProcessInfo, b: &ProcessInfo, col: SortColumn, asce
         SortColumn::MemPercent => quantize(a.mem_percent).cmp(&quantize(b.mem_percent)).then(a.pid.cmp(&b.pid)),
         SortColumn::GpuPercent => quantize(a.gpu_percent).cmp(&quantize(b.gpu_percent)).then(a.pid.cmp(&b.pid)),
         SortColumn::GpuMem => a.gpu_mem_bytes.cmp(&b.gpu_mem_bytes).then(a.pid.cmp(&b.pid)),
+        SortColumn::NetRate => quantize(a.net_rate).cmp(&quantize(b.net_rate)).then(a.pid.cmp(&b.pid)),
+        SortColumn::NetTotal => (a.net_tx_bytes + a.net_rx_bytes).cmp(&(b.net_tx_bytes + b.net_rx_bytes)).then(a.pid.cmp(&b.pid)),
+        SortColumn::NetIf => a.net_ifname.cmp(&b.net_ifname).then(a.pid.cmp(&b.pid)),
         SortColumn::Time => quantize(a.cpu_time_secs).cmp(&quantize(b.cpu_time_secs)).then(a.pid.cmp(&b.pid)),
         SortColumn::Container => a.container.cmp(&b.container).then(a.pid.cmp(&b.pid)),
         SortColumn::Service => a.service.cmp(&b.service).then(a.pid.cmp(&b.pid)),
@@ -295,6 +318,7 @@ pub fn matches_filter(proc: &ProcessInfo, filter: &str) -> bool {
         || proc.pid.to_string().contains(filter)
         || proc.user.to_lowercase().contains(&filter_lower)
         || proc.service.as_deref().is_some_and(|s| s.to_lowercase().contains(&filter_lower))
+        || (!proc.net_ifname.is_empty() && proc.net_ifname.to_lowercase().contains(&filter_lower))
 }
 
 /// Format bytes into human-readable form (K, M, G).
@@ -307,6 +331,19 @@ pub fn format_bytes(bytes: u64) -> String {
         format!("{:.0}K", bytes as f64 / 1024.0)
     } else {
         format!("{}B", bytes)
+    }
+}
+
+/// Format a network rate (bytes/sec) into human-readable form with /s suffix.
+pub fn format_rate(bytes_per_sec: f64) -> String {
+    if bytes_per_sec >= 1024.0 * 1024.0 * 1024.0 {
+        format!("{:.1}G/s", bytes_per_sec / (1024.0 * 1024.0 * 1024.0))
+    } else if bytes_per_sec >= 1024.0 * 1024.0 {
+        format!("{:.1}M/s", bytes_per_sec / (1024.0 * 1024.0))
+    } else if bytes_per_sec >= 1024.0 {
+        format!("{:.0}K/s", bytes_per_sec / 1024.0)
+    } else {
+        format!("{:.0}B/s", bytes_per_sec)
     }
 }
 
@@ -344,6 +381,10 @@ mod tests {
             mem_percent: 0.0,
             gpu_percent: 0.0,
             gpu_mem_bytes: 0,
+            net_rx_bytes: 0,
+            net_tx_bytes: 0,
+            net_rate: 0.0,
+            net_ifname: String::new(),
             cpu_time_secs: 0.0,
             start_time_ns: 0,
             comm: String::from("test"),

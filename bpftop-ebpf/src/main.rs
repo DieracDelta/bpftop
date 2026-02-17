@@ -3,11 +3,11 @@
 
 use aya_ebpf::{
     helpers::{bpf_get_current_pid_tgid, bpf_get_current_task, bpf_probe_read_kernel},
-    macros::{map, tracepoint},
+    macros::{kprobe, kretprobe, map, tracepoint},
     maps::HashMap,
-    programs::TracePointContext,
+    programs::{ProbeContext, RetProbeContext, TracePointContext},
 };
-use bpftop_common::{CmdlineEvent, TaskInfo};
+use bpftop_common::{CmdlineEvent, NetStats, TaskInfo};
 
 // ============================================================
 // Kernel struct field byte offsets (Linux 6.12, from BTF)
@@ -88,6 +88,12 @@ const CGROUP_KN: usize = 256;       // kn: *kernfs_node
 
 // kernfs_node (same on both architectures)
 const KN_ID: usize = 96;            // id: u64
+
+// --- network struct offsets (same on both architectures, Linux 6.12) ---
+const SOCK_DST_CACHE: usize = 528;  // sock.sk_dst_cache: *dst_entry
+const SOCK_BOUND_DEV_IF: usize = 20; // sock.__sk_common.skc_bound_dev_if: i32
+const DST_DEV: usize = 0;           // dst_entry.dev: *net_device
+const NETDEV_IFINDEX: usize = 224;  // net_device.ifindex: i32
 
 // ============================================================
 // Helper: read a kernel field at a fixed byte offset
@@ -281,12 +287,191 @@ unsafe fn try_capture_cmdline() -> Result<i32, i64> {
     Ok(0)
 }
 
-/// Clean up CMDLINE_MAP entry when a process exits.
+/// Clean up CMDLINE_MAP and NET_STATS entries when a process exits.
 #[tracepoint(category = "sched", name = "sched_process_exit")]
 pub fn cleanup_cmdline(_ctx: TracePointContext) -> i32 {
     let pid = (bpf_get_current_pid_tgid() >> 32) as u32;
     let _ = CMDLINE_MAP.remove(&pid);
+    let _ = NET_STATS.remove(&pid);
     0
+}
+
+// ============================================================
+// Network kprobes + NET_STATS map
+// ============================================================
+
+#[map]
+static NET_STATS: HashMap<u32, NetStats> = HashMap::with_max_entries(32768, 0);
+
+/// Read the interface index from a sock's cached route destination.
+/// Falls back to sk_bound_dev_if if sk_dst_cache is NULL.
+/// Returns 0 if both are unavailable.
+#[inline(always)]
+unsafe fn read_sock_ifindex(sk: *const u8) -> u32 {
+    // Try sk->sk_dst_cache->dev->ifindex
+    let dst: *const u8 = read_field(sk, SOCK_DST_CACHE).unwrap_or(core::ptr::null());
+    if !dst.is_null() {
+        let dev: *const u8 = read_field(dst, DST_DEV).unwrap_or(core::ptr::null());
+        if !dev.is_null() {
+            let ifidx: i32 = read_field(dev, NETDEV_IFINDEX).unwrap_or(0);
+            if ifidx > 0 {
+                return ifidx as u32;
+            }
+        }
+    }
+    // Fallback: sk->__sk_common.skc_bound_dev_if
+    let bound: i32 = read_field(sk, SOCK_BOUND_DEV_IF).unwrap_or(0);
+    if bound > 0 { bound as u32 } else { 0 }
+}
+
+/// Update NET_STATS for the current pid, adding tx_bytes.
+#[inline(always)]
+unsafe fn account_tx(size: u64, sk: *const u8) {
+    let pid = (bpf_get_current_pid_tgid() >> 32) as u32;
+    let ifindex = read_sock_ifindex(sk);
+
+    match NET_STATS.get_ptr_mut(&pid) {
+        Some(stats) => {
+            (*stats).tx_bytes += size;
+            if ifindex != 0 {
+                (*stats).ifindex = ifindex;
+            }
+        }
+        None => {
+            let stats = NetStats {
+                tx_bytes: size,
+                rx_bytes: 0,
+                ifindex,
+                _pad: 0,
+            };
+            let _ = NET_STATS.insert(&pid, &stats, 0);
+        }
+    }
+}
+
+/// Update NET_STATS for the current pid, adding rx_bytes + ifindex from stashed sock.
+#[inline(always)]
+unsafe fn account_rx(size: u64, sk: *const u8) {
+    let pid = (bpf_get_current_pid_tgid() >> 32) as u32;
+    let ifindex = if !sk.is_null() {
+        read_sock_ifindex(sk)
+    } else {
+        0
+    };
+
+    match NET_STATS.get_ptr_mut(&pid) {
+        Some(stats) => {
+            (*stats).rx_bytes += size;
+            if ifindex != 0 {
+                (*stats).ifindex = ifindex;
+            }
+        }
+        None => {
+            let stats = NetStats {
+                tx_bytes: 0,
+                rx_bytes: size,
+                ifindex,
+                _pad: 0,
+            };
+            let _ = NET_STATS.insert(&pid, &stats, 0);
+        }
+    }
+}
+
+/// Stash map: pid_tgid -> sock pointer, used to pass sock from kprobe entry to kretprobe.
+#[map]
+static RECV_SOCK_STASH: HashMap<u64, u64> = HashMap::with_max_entries(8192, 0);
+
+// --- TCP ---
+
+#[kprobe]
+pub fn kprobe_tcp_sendmsg(ctx: ProbeContext) -> u32 {
+    unsafe { try_tcp_sendmsg(&ctx).unwrap_or(0) }
+}
+
+unsafe fn try_tcp_sendmsg(ctx: &ProbeContext) -> Result<u32, i64> {
+    // tcp_sendmsg(struct sock *sk, struct msghdr *msg, size_t size)
+    let sk: *const u8 = ctx.arg(0).ok_or(-1i64)?;
+    let size: u64 = ctx.arg(2).ok_or(-1i64)?;
+    account_tx(size, sk);
+    Ok(0)
+}
+
+/// Stash sock pointer on tcp_recvmsg entry for the kretprobe to read.
+#[kprobe]
+pub fn kprobe_tcp_recvmsg(ctx: ProbeContext) -> u32 {
+    unsafe { try_stash_recv_sock(&ctx).unwrap_or(0) }
+}
+
+#[kretprobe]
+pub fn kretprobe_tcp_recvmsg(ctx: RetProbeContext) -> u32 {
+    unsafe { try_tcp_recvmsg(&ctx).unwrap_or(0) }
+}
+
+unsafe fn try_tcp_recvmsg(ctx: &RetProbeContext) -> Result<u32, i64> {
+    let pid_tgid = bpf_get_current_pid_tgid();
+    let sk = pop_recv_sock(pid_tgid);
+    // tcp_recvmsg returns int (32-bit); upper 32 bits of rax may be garbage
+    let ret: i32 = ctx.ret();
+    if ret > 0 {
+        account_rx(ret as u64, sk as *const u8);
+    }
+    Ok(0)
+}
+
+// --- UDP ---
+
+#[kprobe]
+pub fn kprobe_udp_sendmsg(ctx: ProbeContext) -> u32 {
+    unsafe { try_udp_sendmsg(&ctx).unwrap_or(0) }
+}
+
+unsafe fn try_udp_sendmsg(ctx: &ProbeContext) -> Result<u32, i64> {
+    // udp_sendmsg(struct sock *sk, struct msghdr *msg, size_t size)
+    let sk: *const u8 = ctx.arg(0).ok_or(-1i64)?;
+    let size: u64 = ctx.arg(2).ok_or(-1i64)?;
+    account_tx(size, sk);
+    Ok(0)
+}
+
+/// Stash sock pointer on udp_recvmsg entry for the kretprobe to read.
+#[kprobe]
+pub fn kprobe_udp_recvmsg(ctx: ProbeContext) -> u32 {
+    unsafe { try_stash_recv_sock(&ctx).unwrap_or(0) }
+}
+
+#[kretprobe]
+pub fn kretprobe_udp_recvmsg(ctx: RetProbeContext) -> u32 {
+    unsafe { try_udp_recvmsg(&ctx).unwrap_or(0) }
+}
+
+unsafe fn try_udp_recvmsg(ctx: &RetProbeContext) -> Result<u32, i64> {
+    let pid_tgid = bpf_get_current_pid_tgid();
+    let sk = pop_recv_sock(pid_tgid);
+    // udp_recvmsg returns int (32-bit); upper 32 bits of rax may be garbage
+    let ret: i32 = ctx.ret();
+    if ret > 0 {
+        account_rx(ret as u64, sk as *const u8);
+    }
+    Ok(0)
+}
+
+/// Shared: stash sock pointer (arg0) keyed by pid_tgid for kretprobe to retrieve.
+unsafe fn try_stash_recv_sock(ctx: &ProbeContext) -> Result<u32, i64> {
+    let sk: u64 = ctx.arg(0).ok_or(-1i64)?;
+    let pid_tgid = bpf_get_current_pid_tgid();
+    let _ = RECV_SOCK_STASH.insert(&pid_tgid, &sk, 0);
+    Ok(0)
+}
+
+/// Pop the stashed sock pointer for this pid_tgid (removes from map).
+unsafe fn pop_recv_sock(pid_tgid: u64) -> u64 {
+    let sk = RECV_SOCK_STASH
+        .get(&pid_tgid)
+        .copied()
+        .unwrap_or(0);
+    let _ = RECV_SOCK_STASH.remove(&pid_tgid);
+    sk
 }
 
 #[panic_handler]

@@ -52,6 +52,17 @@ pub struct CmdlineEvent {
     pub cmdline: [u8; 256],
 }
 
+/// Per-process network I/O stats collected by kprobes on tcp/udp send/recv.
+#[repr(C)]
+#[derive(Clone, Copy)]
+#[cfg_attr(feature = "userspace", derive(Debug))]
+pub struct NetStats {
+    pub tx_bytes: u64,
+    pub rx_bytes: u64,
+    pub ifindex: u32,
+    pub _pad: u32,
+}
+
 /// File descriptor information collected by the eBPF file iterator.
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -89,3 +100,6 @@ unsafe impl aya::Pod for FileInfo {}
 
 #[cfg(feature = "userspace")]
 unsafe impl aya::Pod for CmdlineEvent {}
+
+#[cfg(feature = "userspace")]
+unsafe impl aya::Pod for NetStats {}

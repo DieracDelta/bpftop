@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::time::Instant;
 
 use anyhow::Result;
 
@@ -21,6 +22,9 @@ pub struct Collector {
     prev_cpu_total: CpuStats,
     prev_cpus: Vec<CpuStats>,
     prev_proc_times: HashMap<u32, u64>,
+    prev_net_bytes: HashMap<u32, u64>,
+    prev_net_time: Instant,
+    ifindex_cache: HashMap<u32, String>,
     page_size: u64,
     #[cfg(feature = "gpu")]
     gpu_collector: Option<GpuCollector>,
@@ -45,6 +49,9 @@ impl Collector {
             prev_cpu_total,
             prev_cpus,
             prev_proc_times: HashMap::new(),
+            prev_net_bytes: HashMap::new(),
+            prev_net_time: Instant::now(),
+            ifindex_cache: HashMap::new(),
             page_size,
             #[cfg(feature = "gpu")]
             gpu_collector: GpuCollector::try_new(),
@@ -60,6 +67,9 @@ impl Collector {
             prev_cpu_total: CpuStats::default(),
             prev_cpus: Vec::new(),
             prev_proc_times: HashMap::new(),
+            prev_net_bytes: HashMap::new(),
+            prev_net_time: Instant::now(),
+            ifindex_cache: HashMap::new(),
             page_size: 4096,
             #[cfg(feature = "gpu")]
             gpu_collector: None,
@@ -214,6 +224,10 @@ impl Collector {
                 mem_percent,
                 gpu_percent: 0.0,
                 gpu_mem_bytes: 0,
+                net_rx_bytes: 0,
+                net_tx_bytes: 0,
+                net_rate: 0.0,
+                net_ifname: String::new(),
                 cpu_time_secs,
                 start_time_ns: task.start_time_ns,
                 comm,
@@ -246,6 +260,35 @@ impl Collector {
             }
         }
 
+        // Network data from BPF kprobes
+        let net_stats = self.ebpf.read_net_stats();
+        let now = Instant::now();
+        let wall_delta_secs = now.duration_since(self.prev_net_time).as_secs_f64().max(0.1);
+        let mut new_net_bytes = HashMap::new();
+        for proc in &mut processes {
+            if let Some(&(tx, rx, ifindex)) = net_stats.get(&proc.pid) {
+                proc.net_tx_bytes = tx;
+                proc.net_rx_bytes = rx;
+                let total = tx + rx;
+                let prev_total = self.prev_net_bytes.get(&proc.pid).copied().unwrap_or(total);
+                let delta = total.saturating_sub(prev_total);
+                proc.net_rate = delta as f64 / wall_delta_secs;
+                new_net_bytes.insert(proc.pid, total);
+
+                // Resolve interface name
+                if ifindex > 0 {
+                    let ifname = self.ifindex_cache.entry(ifindex).or_insert_with(|| {
+                        nix::net::if_::if_indextoname(ifindex)
+                            .map(|s| s.to_string_lossy().into_owned())
+                            .unwrap_or_else(|_| format!("if{ifindex}"))
+                    });
+                    proc.net_ifname = ifname.clone();
+                } else {
+                    proc.net_ifname = "*".to_string();
+                }
+            }
+        }
+
         // Build parent-child relationships for tree view
         let pid_set: HashMap<u32, usize> = processes
             .iter()
@@ -272,6 +315,8 @@ impl Collector {
             .iter()
             .map(|p| (p.pid, p.prev_cpu_ns))
             .collect();
+        self.prev_net_bytes = new_net_bytes;
+        self.prev_net_time = now;
 
         let sys_info = SystemInfo {
             cpu_total,
