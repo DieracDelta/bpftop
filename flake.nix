@@ -31,7 +31,7 @@
 
           workspaceVendor = pkgs.rustPlatform.fetchCargoVendor {
             src = ./.;
-            hash = "sha256-mWXBOzCakzWHzB2ySJPVZpWakLSh4AL+2RKhKcm1ei4=";
+            hash = "sha256-ECV4yHAsu/QX9YwT0jwV7lity0xtPnE+frc1CjHdSH4=";
           };
 
           # Combined LLVM 22 (dev + lib outputs merged for bpf-linker's build script)
