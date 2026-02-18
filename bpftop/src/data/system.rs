@@ -76,6 +76,8 @@ pub struct MemoryInfo {
     pub cached: u64,
     pub s_reclaimable: u64,
     pub used: u64,
+    /// Live physical RAM backing zram (3rd field of mm_stat).
+    pub zram_mem_used: u64,
 }
 
 impl MemoryInfo {
@@ -90,6 +92,8 @@ pub struct SwapInfo {
     pub total: u64,
     pub free: u64,
     pub used: u64,
+    /// zram compression ratio (orig_data / compr_data); None if no zram or no data stored.
+    pub zram_compression_ratio: Option<f64>,
 }
 
 impl SwapInfo {
@@ -168,9 +172,45 @@ pub fn read_memory_info() -> Result<(MemoryInfo, SwapInfo)> {
     }
 
     mem.used = mem.total.saturating_sub(mem.free + mem.buffers + mem.cached + mem.s_reclaimable);
+    let (zram_mem_used, zram_ratio) = read_zram_stats();
+    mem.zram_mem_used = zram_mem_used;
     swap.used = swap.total.saturating_sub(swap.free);
+    swap.zram_compression_ratio = zram_ratio;
 
     Ok((mem, swap))
+}
+
+/// Read zram stats from /sys/block/zram*/mm_stat.
+/// Returns (total_mem_used, compression_ratio).
+/// mm_stat fields: orig_data_size compr_data_size mem_used_total ...
+fn read_zram_stats() -> (u64, Option<f64>) {
+    let Ok(entries) = fs::read_dir("/sys/block") else { return (0, None) };
+    let mut total_mem_used = 0u64;
+    let mut total_orig = 0u64;
+    let mut total_compr = 0u64;
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        if !name.starts_with("zram") { continue; }
+        if let Ok(content) = fs::read_to_string(entry.path().join("mm_stat")) {
+            let fields: Vec<u64> = content
+                .split_whitespace()
+                .take(3)
+                .filter_map(|s| s.parse().ok())
+                .collect();
+            if fields.len() >= 3 {
+                total_orig += fields[0];
+                total_compr += fields[1];
+                total_mem_used += fields[2];
+            }
+        }
+    }
+    let ratio = if total_compr > 0 {
+        Some(total_orig as f64 / total_compr as f64)
+    } else {
+        None
+    };
+    (total_mem_used, ratio)
 }
 
 /// Read load averages from /proc/loadavg.

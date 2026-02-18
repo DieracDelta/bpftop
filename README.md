@@ -1,6 +1,6 @@
 DISCLAIMER: I worked closely with claude-code while building this. Claude has touched many parts of this codebase.
 
-# What is this
+# BPFTOP: An extremely *B*espoke*PF* process monitor
 
 htop, but with eBPF. Uses BPF iterators to walk the kernel task list directly instead of scraping `/proc/PID/*` for every process. The frontend is Ratatui TUI.
 
@@ -13,7 +13,7 @@ Here's a (somewhat dated) demo. Try the program to see new features!
 
 ![demo](demo.gif)
 
-# COOL AF FEATURES
+# THE BESPOKE ASF FEATURES
 
 - Container aware (docker+podman) for each process
 - Shows which systemd unit (`.service`, `.slice`, `.scope`) owns a process — useful when you have 15 things all named `python3`
@@ -21,17 +21,20 @@ Here's a (somewhat dated) demo. Try the program to see new features!
 - NVIDIA GPU usage per process (VRAM+%used)
 - Cgroup v2 freeze/thaw — freeze entire services or containers atomically (press `f`). This is OP!!
 - Vim keybindings, folding, visual mode, first class support for yank to clipboard that works in tmux
-- Statically linked MUSL target uploaded to CI so you can scp it onto any linux box
+- Statically linked MUSL targets uploaded to CI so you can run onto any linux box
 - CROSS PLATFORM: I got the bpf reading for both ARM and x86_64 working.
+- zram aware! htop isn't zram aware. My RAM always reads wrong... The bar is full but the ram number is not...
 - htop is prettyCoolTM. We have htop feature parity, so that's pretty cool too
 
 # Okay, WTF is freezing?
 
 I always felt so powerless in htop. Picture this: you're about to OOM and be subjected to the OOM killer. Some process keeps on allocating more memory. You're sure which one, but you're like "NOOO" because it's important and been running for 30 minutes and you really don't want to kill it. So what do you do? Kill something else? But you have 5s before you max out your RAM! So you sit there, watching, crying, knowing the OOM killer will kill the process and maybe some other stuff. You're frozen in despair. Maybe the process is maxxing out your CPU too, you don't know about niceness, and htop is SLOW because you have 100k pids. Turns out you aren't frozen by choice. You're frozen by circumstance.
 
-Maybe you think "what if I suspend and resume"? Suspend/resume works by sending SIGTSTP/SIGCONT. This is visible to the process and its parents (SIGCHLD). It has some handler. Forks children, and parents of a children might keep going. So, it's deadass fucked and not at all clean if you just wish pause the process so you can figure out your ram situation. Also you're gonna get unintuitive racy behavior like if you sigstop right before a child runs and then the child doesn't get the symbol and then gets upset because the parent is stoped. This has ALWAYS bothered me. And now with cgroups v2 + bpftop we have a solution!
+Maybe you think "what if I suspend and resume"? Suspend/resume works by sending SIGTSTP/SIGCONT. These signals are visible to the process and its parents (SIGCHLD). The signals can have some handler that can ignore them. Talk about mixed signals! Forks, children, and parents of a children might keep going. So, it's deadass fucked and not at all clean if you just wish pause the process so you can figure out your RAM situation. Also you'll get unintuitive racy behavior like if you sigstop right before a child spins up and then the child doesn't get the signal and then gets upset because the parent is stoped.
 
-`cgroup.freeze` stops scheduling everything in the cgroup atomically. The processes have no idea. New forks are born frozen. Only someone with cgroupfs write access can thaw. The only thing is the system clock continues. So, maybe the process is a little confused. But this is still a massive improvement!
+This has ALWAYS bothered me. And now with cgroups v2 + bpftop we have a solution!
+
+`cgroup.freeze` stops scheduling everything in the cgroup atomically. The processes have no idea. New forks are born frozen. Only someone with cgroupfs write access can thaw. The only thing is the system clock continues. So, maybe the time traveling process is a little confused. But this is still a massive improvement!
 
 You can use this for fun and profit in bpftop! `f` to freeze, `u` to thaw with a confirmation dialog, `U` to thaw instantly. Frozen processes are clearly marked in bpftop.
 

@@ -195,7 +195,8 @@ fn render_mem_bar(buf: &mut Buffer, area: Rect, mem: &MemoryInfo, theme: &Theme)
         return;
     }
 
-    let total_gb = mem.total as f64 / (1024.0 * 1024.0 * 1024.0);
+    let effective_total = mem.total.saturating_sub(mem.zram_mem_used);
+    let total_gb = effective_total as f64 / (1024.0 * 1024.0 * 1024.0);
     let used_gb = mem.used as f64 / (1024.0 * 1024.0 * 1024.0);
     let prefix = "Mem[";
     let suffix = format!("{used_gb:.1}G/{total_gb:.1}G]");
@@ -204,24 +205,13 @@ fn render_mem_bar(buf: &mut Buffer, area: Rect, mem: &MemoryInfo, theme: &Theme)
         return;
     }
 
-    let used_pct = if mem.total > 0 { mem.used as f64 / mem.total as f64 } else { 0.0 };
-    let cached_pct = if mem.total > 0 { mem.cached as f64 / mem.total as f64 } else { 0.0 };
-    let buffers_pct = if mem.total > 0 { mem.buffers as f64 / mem.total as f64 } else { 0.0 };
-
+    let used_pct = if effective_total > 0 { mem.used as f64 / effective_total as f64 } else { 0.0 };
     let used_chars = (used_pct * bar_width as f64) as usize;
-    let cached_chars = (cached_pct * bar_width as f64) as usize;
-    let buf_chars = (buffers_pct * bar_width as f64) as usize;
-    let empty = bar_width.saturating_sub(used_chars + cached_chars + buf_chars);
+    let empty = bar_width.saturating_sub(used_chars);
 
     let mut spans = vec![Span::styled(prefix, Style::default().fg(theme.fg))];
     if used_chars > 0 {
         spans.push(Span::styled("|".repeat(used_chars), Style::default().fg(theme.mem_used)));
-    }
-    if buf_chars > 0 {
-        spans.push(Span::styled("|".repeat(buf_chars), Style::default().fg(theme.mem_buffers)));
-    }
-    if cached_chars > 0 {
-        spans.push(Span::styled("|".repeat(cached_chars), Style::default().fg(theme.mem_cached)));
     }
     if empty > 0 {
         spans.push(Span::styled(" ".repeat(empty), Style::default().fg(theme.fg)));
@@ -318,7 +308,10 @@ fn render_swap_bar(buf: &mut Buffer, area: Rect, swap: &SwapInfo, theme: &Theme)
     let total_gb = swap.total as f64 / (1024.0 * 1024.0 * 1024.0);
     let used_gb = swap.used as f64 / (1024.0 * 1024.0 * 1024.0);
     let prefix = "Swp[";
-    let suffix = format!("{used_gb:.1}G/{total_gb:.1}G]");
+    let suffix = match swap.zram_compression_ratio {
+        Some(ratio) => format!("{used_gb:.1}G/{total_gb:.1}G {ratio:.1}:1CMPR]"),
+        None => format!("{used_gb:.1}G/{total_gb:.1}G]"),
+    };
     let bar_width = (area.width as usize).saturating_sub(prefix.len() + suffix.len());
     if bar_width == 0 {
         return;
