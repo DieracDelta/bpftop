@@ -1,23 +1,28 @@
-DISCLAIMER: I worked closely with claude-code while building this. Claude has touched many parts of this codebase.
 
 # BPFTOP: An extremely *B*espoke*PF* process monitor
 
-htop, but with eBPF. Uses BPF iterators to walk the kernel task list directly instead of scraping `/proc/PID/*` for every process. The frontend is Ratatui TUI.
+Ever craved the rush of racing a ferrari, but couldn't justify taking out a second mortgage? 9/10 race car drivers say BPFtop is so fast that they feel *more* of a rush than that time they went supersonic on the track.
 
-htop does ~4 file reads per process *per* refresh cycle. It scales linearly -- O(n)! So, you're screwed if you have a lot of PIDs, and keep opening htop willy nilly and forgetting to close them. Htop ends up as one of the things eating up cores. As AFAIU the other process monitors like btm or btop also do this.
+BPFtop is htop, but eBPF. We use BPF iterators to walk the kernel task list directly instead of scraping `/proc/PID/*` for every process.
 
+htop does ~4 file reads per process *per* refresh cycle. It scales linearly -- O(n)! So, you're screwed if you have a lot of PIDs, and keep opening htop willy nilly and forget to close them. Htop ends up as one of the things eating up many instructions. As AFAIU the other process monitors like btm or btop also have this issue.
 
-BUT life doesn't HAVE to be this way in the year of 2026!. bpftop does one BPF iterator walk + 4 constant `/proc` reads regardless of process count. So, O(1) syscall count. BIG MONEY!!!
+BUT life doesn't HAVE to be this way in the year of 2026! bpftop does one BPF iterator walk + 4 constant `/proc` reads regardless of process count. So, O(1) syscall count. Fast as fuck! BIG MONEY!!!
 
-Here's a (somewhat dated) demo. Try the program to see new features!
+Here's a (somewhat dated) demo.
 
 ![demo](demo.gif)
 
+# DISCLAIMER:
+
+I worked closely with claude-code while building this. Claude has touched many parts of this codebase.
+
 # THE BESPOKE ASF FEATURES
 
+- BLAZINGLY FAST because the heavy lifting is done kernel-sid3
 - Container aware (docker+podman) for each process
 - Shows which systemd unit (`.service`, `.slice`, `.scope`) owns a process — useful when you have 15 things all named `python3`
-- Per-process network I/O tracking via kprobes on tcp/udp send/recv (`N` to toggle)
+- Per-process network I/O tracking via kprobes on tcp/udp send/recv (`N` to toggle). Still in eBPF land, so no syscall overhead here either!
 - NVIDIA GPU usage per process (VRAM+%used)
 - Cgroup v2 freeze/thaw — freeze entire services or containers atomically (press `f`). This is OP!!
 - Vim keybindings, folding, visual mode, first class support for yank to clipboard that works in tmux
@@ -28,9 +33,9 @@ Here's a (somewhat dated) demo. Try the program to see new features!
 
 # Okay, WTF is freezing?
 
-I always felt so powerless in htop. Picture this: you're about to OOM and be subjected to the OOM killer. Some process keeps on allocating more memory. You're sure which one, but you're like "NOOO" because it's important and been running for 30 minutes and you really don't want to kill it. So what do you do? Kill something else? But you have 5s before you max out your RAM! So you sit there, watching, crying, knowing the OOM killer will kill the process and maybe some other stuff. You're frozen in despair. Maybe the process is maxxing out your CPU too, you don't know about niceness, and htop is SLOW because you have 100k pids. Turns out you aren't frozen by choice. You're frozen by circumstance.
+I always felt so powerless in htop. Picture this: you're about to OOM and be subjected to the OOM killer. Some process keeps on allocating more memory. You figure out the problematic pid, but you're like "NOOO" because that pid is important and been running for 30 minutes and you really don't want to kill it. So what do you do? Kill something else? But you have 5s before you max out your RAM! So you sit there, watching, crying, knowing the OOM killer will kill the process and maybe some other stuff. You're frozen in despair. Maybe the process is maxxing out your CPU too, you don't know about niceness, and htop is SLOW because you have 100k pids. Turns out you aren't frozen by choice. Nope. You're frozen by circumstance.
 
-Maybe you think "what if I suspend and resume"? Suspend/resume works by sending SIGTSTP/SIGCONT. These signals are visible to the process and its parents (SIGCHLD). The signals can have some handler that can ignore them. Talk about mixed signals! Forks, children, and parents of a children might keep going. So, it's deadass fucked and not at all clean if you just wish pause the process so you can figure out your RAM situation. Also you'll get unintuitive racy behavior like if you sigstop right before a child spins up and then the child doesn't get the signal and then gets upset because the parent is stoped.
+Maybe you think "what if I suspend and resume"? Suspend/resume works by sending SIGTSTP/SIGCONT. These signals are visible to the process and its parents (SIGCHLD). The signals can have some handler that can ignore them. Talk about mixed signals! Forks, children, and parents of a children might keep going. So, it's deadass fucked and not at all clean if you SIGTSTP the process so you can figure out your RAM situation. What's worse, you'll get unintuitive racy behavior like if you SIGTSTP right before a child spins up and then the child doesn't get the signal and then gets upset because the parent is stoped.
 
 This has ALWAYS bothered me. And now with cgroups v2 + bpftop we have a solution!
 
