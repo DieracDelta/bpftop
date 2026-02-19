@@ -3,9 +3,24 @@ use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::widgets::Widget;
 
+use unicode_width::UnicodeWidthChar;
+
 use crate::data::container::ServiceDisplayMode;
 use crate::data::process::{format_bytes, format_rate, format_time, ProcessInfo, ProcessState, SortColumn};
 use crate::theme::Theme;
+
+/// Truncate a string to at most `max_cols` display columns (Unicode-aware).
+fn truncate_cols(s: &str, max_cols: usize) -> &str {
+    let mut cols = 0;
+    for (i, ch) in s.char_indices() {
+        let w = ch.width().unwrap_or(0);
+        if cols + w > max_cols {
+            return &s[..i];
+        }
+        cols += w;
+    }
+    s
+}
 
 /// Renders the scrollable, sortable process table.
 pub struct ProcessTableWidget<'a> {
@@ -172,8 +187,9 @@ impl<'a> ProcessTableWidget<'a> {
             SortColumn::Pid => format!("{:>w$}", proc.pid),
             SortColumn::User => {
                 let u = &proc.user;
-                if u.len() > w {
-                    u[..w].to_string()
+                let t = truncate_cols(u, w);
+                if t.len() < u.len() {
+                    t.to_string()
                 } else {
                     format!("{:<w$}", u)
                 }
@@ -210,8 +226,9 @@ impl<'a> ProcessTableWidget<'a> {
                     format!("{:<w$}", "-")
                 } else {
                     let name = &proc.net_ifname;
-                    if name.len() > w {
-                        name[..w].to_string()
+                    let t = truncate_cols(name, w);
+                    if t.len() < name.len() {
+                        t.to_string()
                     } else {
                         format!("{:<w$}", name)
                     }
@@ -223,27 +240,31 @@ impl<'a> ProcessTableWidget<'a> {
             }
             SortColumn::Container => {
                 let name = proc.container.as_deref().unwrap_or("-");
-                if name.len() > w {
-                    name[..w].to_string()
+                let t = truncate_cols(name, w);
+                if t.len() < name.len() {
+                    t.to_string()
                 } else {
                     format!("{:<w$}", name)
                 }
             }
             SortColumn::Service => {
                 let name = proc.service.as_deref().unwrap_or("-");
-                if name.len() > w {
-                    name[..w].to_string()
+                let t = truncate_cols(name, w);
+                if t.len() < name.len() {
+                    t.to_string()
                 } else {
                     format!("{:<w$}", name)
                 }
             }
             SortColumn::Command => {
                 let display = format!("{}{}", proc.tree_prefix, proc.cmdline);
-                if w > 0 && display.len() > w {
-                    display[..w].to_string()
-                } else {
-                    display
+                if w > 0 {
+                    let t = truncate_cols(&display, w);
+                    if t.len() < display.len() {
+                        return t.to_string();
+                    }
                 }
+                display
             }
         }
     }
