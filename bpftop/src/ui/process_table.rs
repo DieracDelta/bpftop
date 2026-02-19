@@ -103,21 +103,28 @@ impl<'a> Widget for ProcessTableWidget<'a> {
 
 impl<'a> ProcessTableWidget<'a> {
     fn render_header(&self, area: Rect, buf: &mut Buffer) {
-        let style = Style::default()
+        let base_style = Style::default()
             .fg(self.theme.column_header_fg)
             .bg(self.theme.column_header_bg)
             .add_modifier(Modifier::BOLD);
 
+        // Active sort column: reversed fg/bg so it pops (like htop)
+        let sort_style = Style::default()
+            .fg(self.theme.column_header_bg)
+            .bg(self.theme.column_header_fg)
+            .add_modifier(Modifier::BOLD);
+
         // Fill background
         for x in area.x..area.x + area.width {
-            buf[(x, area.y)].set_style(style);
+            buf[(x, area.y)].set_style(base_style);
         }
 
         let columns = self.column_layout(area.width);
         let mut x = area.x;
         for (col, width) in &columns {
+            let is_sort = *col == self.sort_column;
             let label = col.label();
-            let styled = if *col == self.sort_column {
+            let styled = if is_sort {
                 let arrow = if self.sort_ascending { "^" } else { "v" };
                 format!("{label}{arrow}")
             } else {
@@ -128,10 +135,11 @@ impl<'a> ProcessTableWidget<'a> {
             } else {
                 styled
             };
-            buf.set_string(x, area.y, &display, style);
+            let cell_style = if is_sort { sort_style } else { base_style };
+            buf.set_string(x, area.y, &display, cell_style);
             x += *width;
             if x < area.x + area.width {
-                buf.set_string(x, area.y, " ", style);
+                buf.set_string(x, area.y, " ", base_style);
                 x += 1;
             }
         }
@@ -168,11 +176,14 @@ impl<'a> ProcessTableWidget<'a> {
             buf[(x, area.y)].set_style(style);
         }
 
+        let sort_style = style.add_modifier(Modifier::BOLD);
+
         let columns = self.column_layout(area.width);
         let mut x = area.x;
         for (col, width) in &columns {
             let text = self.format_column(proc, col, *width);
-            buf.set_string(x, area.y, &text, style);
+            let cell_style = if *col == self.sort_column { sort_style } else { style };
+            buf.set_string(x, area.y, &text, cell_style);
             x += *width;
             if x < area.x + area.width {
                 buf.set_string(x, area.y, " ", style);
