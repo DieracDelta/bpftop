@@ -5,6 +5,7 @@ use crate::data::container::ServiceDisplayMode;
 use crate::data::process::{SortColumn, YankField};
 use crate::ui::dialogs::signal_list;
 use crate::ui::filter_bar::FilterMode;
+use crate::ui::process_table;
 
 /// Handle a crossterm event, returning true if the app should quit.
 pub fn handle_event(app: &mut App, event: Event) -> bool {
@@ -538,11 +539,42 @@ fn handle_mouse(app: &mut App, mouse: MouseEvent) {
         MouseEventKind::ScrollUp => app.move_selection(-3),
         MouseEventKind::ScrollDown => app.move_selection(3),
         MouseEventKind::Down(_) => {
-            // Click to select a process row
-            // header_height rows + 1 column header row
-            let header_offset = app.header_height + 1;
-            if mouse.row >= header_offset {
-                let row = (mouse.row - header_offset) as usize + app.scroll_offset;
+            let col_header_row = app.header_height;
+            let data_start = app.header_height + 1;
+
+            if mouse.row == col_header_row {
+                // Click on column header → toggle sort
+                let has_container = app.filtered_processes.iter().any(|p| p.container.is_some());
+                let has_service = app.filtered_processes.iter().any(|p| p.service.is_some());
+                let has_gpu = app.show_gpu && app.sys_info.gpus.len() > 0;
+                let layout = process_table::column_layout(
+                    app.table_width,
+                    &app.filtered_processes,
+                    has_container,
+                    has_service,
+                    app.service_display_mode,
+                    has_gpu,
+                    app.show_net,
+                );
+
+                let mut x: u16 = 0;
+                for (col, width) in &layout {
+                    let next_x = x + width + 1; // +1 for separator space
+                    if mouse.column >= x && mouse.column < next_x {
+                        if *col == app.sort_column {
+                            app.sort_ascending = !app.sort_ascending;
+                        } else {
+                            app.sort_column = *col;
+                            app.sort_ascending = col.default_ascending();
+                        }
+                        app.update_filtered_processes();
+                        break;
+                    }
+                    x = next_x;
+                }
+            } else if mouse.row >= data_start {
+                // Click to select a process row
+                let row = (mouse.row - data_start) as usize + app.scroll_offset;
                 if row < app.filtered_processes.len() {
                     app.selected = row;
                 }

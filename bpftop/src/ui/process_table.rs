@@ -270,40 +270,63 @@ impl<'a> ProcessTableWidget<'a> {
     }
 
     fn column_layout(&self, total_width: u16) -> Vec<(SortColumn, u16)> {
-        let mut cols: Vec<(SortColumn, u16)> = SortColumn::all()
-            .iter()
-            .filter(|c| **c != SortColumn::Container || self.show_container)
-            .filter(|c| **c != SortColumn::Service || self.show_service)
-            .filter(|c| (**c != SortColumn::GpuPercent && **c != SortColumn::GpuMem) || self.show_gpu)
-            .filter(|c| !matches!(**c, SortColumn::NetRate | SortColumn::NetTotal | SortColumn::NetIf) || self.show_net)
-            .map(|c| (*c, c.width()))
-            .collect();
-
-        // Size UNIT column to fit content, capped per display mode
-        if let Some(entry) = cols.iter_mut().find(|(c, _)| *c == SortColumn::Service) {
-            let max_len = self.processes.iter()
-                .filter_map(|p| p.service.as_deref())
-                .map(|s| s.len())
-                .max()
-                .unwrap_or(4) as u16;
-            let cap = match self.service_display_mode {
-                ServiceDisplayMode::ServiceOnly => 20,
-                ServiceDisplayMode::AllUnits => 28,
-                ServiceDisplayMode::FullSlice => 40,
-            };
-            // At least wide enough for the header label, at most the cap
-            entry.1 = max_len.clamp(5, cap);
-        }
-
-        // Calculate remaining width for Command column
-        let fixed_width: u16 = cols.iter().filter(|(c, _)| *c != SortColumn::Command).map(|(_, w)| w + 1).sum();
-        let cmd_width = total_width.saturating_sub(fixed_width);
-        if let Some(entry) = cols.iter_mut().find(|(c, _)| *c == SortColumn::Command) {
-            entry.1 = cmd_width;
-        }
-
-        cols
+        column_layout(
+            total_width,
+            self.processes,
+            self.show_container,
+            self.show_service,
+            self.service_display_mode,
+            self.show_gpu,
+            self.show_net,
+        )
     }
+}
+
+/// Compute the column layout: which columns are visible and their widths.
+///
+/// This is extracted so that `input.rs` can resolve mouse clicks to columns.
+pub fn column_layout(
+    total_width: u16,
+    processes: &[ProcessInfo],
+    show_container: bool,
+    show_service: bool,
+    service_display_mode: ServiceDisplayMode,
+    show_gpu: bool,
+    show_net: bool,
+) -> Vec<(SortColumn, u16)> {
+    let mut cols: Vec<(SortColumn, u16)> = SortColumn::all()
+        .iter()
+        .filter(|c| **c != SortColumn::Container || show_container)
+        .filter(|c| **c != SortColumn::Service || show_service)
+        .filter(|c| (**c != SortColumn::GpuPercent && **c != SortColumn::GpuMem) || show_gpu)
+        .filter(|c| !matches!(**c, SortColumn::NetRate | SortColumn::NetTotal | SortColumn::NetIf) || show_net)
+        .map(|c| (*c, c.width()))
+        .collect();
+
+    // Size UNIT column to fit content, capped per display mode
+    if let Some(entry) = cols.iter_mut().find(|(c, _)| *c == SortColumn::Service) {
+        let max_len = processes.iter()
+            .filter_map(|p| p.service.as_deref())
+            .map(|s| s.len())
+            .max()
+            .unwrap_or(4) as u16;
+        let cap = match service_display_mode {
+            ServiceDisplayMode::ServiceOnly => 20,
+            ServiceDisplayMode::AllUnits => 28,
+            ServiceDisplayMode::FullSlice => 40,
+        };
+        // At least wide enough for the header label, at most the cap
+        entry.1 = max_len.clamp(5, cap);
+    }
+
+    // Calculate remaining width for Command column
+    let fixed_width: u16 = cols.iter().filter(|(c, _)| *c != SortColumn::Command).map(|(_, w)| w + 1).sum();
+    let cmd_width = total_width.saturating_sub(fixed_width);
+    if let Some(entry) = cols.iter_mut().find(|(c, _)| *c == SortColumn::Command) {
+        entry.1 = cmd_width;
+    }
+
+    cols
 }
 
 /// Calculate visible row count for the process table area.

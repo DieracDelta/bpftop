@@ -113,8 +113,9 @@ pub struct App {
     // Flash message (transient status bar text)
     pub flash_message: Option<(String, Instant)>,
 
-    // Dynamic header height (set during draw)
+    // Dynamic header height and table width (set during draw)
     pub header_height: u16,
+    pub table_width: u16,
 
     // Redraw control
     pub dirty: bool,
@@ -184,6 +185,7 @@ impl App {
             visual_anchor: None,
             flash_message: None,
             header_height: 4,
+            table_width: 0,
             dirty: true,
             collector,
             ebpf_loaded,
@@ -291,6 +293,7 @@ impl App {
         let (header_area, table_area, status_area, filter_area) =
             main_layout(area, filter_active, num_cpus, num_gpus);
         self.header_height = header_area.height;
+        self.table_width = table_area.width;
 
         // Header meters
         let header = HeaderWidget {

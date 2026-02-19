@@ -271,6 +271,12 @@ impl SortColumn {
             Self::Command => 0, // fills remaining space
         }
     }
+
+    /// Default sort direction when first clicking a column header.
+    /// Text columns default to ascending; numeric columns to descending.
+    pub fn default_ascending(&self) -> bool {
+        matches!(self, Self::Pid | Self::User | Self::State | Self::NetIf | Self::Container | Self::Service | Self::Command)
+    }
 }
 
 /// Truncate a float to 1 decimal place for stable comparison.
