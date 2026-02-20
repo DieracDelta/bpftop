@@ -6,6 +6,8 @@ edition = "2021"
 [features]
 arch-x86_64 = []
 arch-aarch64 = []
+kernel-6_12 = []
+kernel-6_18 = []
 
 [dependencies]
 aya-ebpf = { git = "https://github.com/aya-rs/aya", branch = "main" }

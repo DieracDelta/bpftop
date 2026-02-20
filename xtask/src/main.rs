@@ -14,12 +14,18 @@ enum Cli {
         /// Build in release mode
         #[clap(long)]
         release: bool,
+        /// Kernel version for struct offsets (e.g. "6_12", "6_18")
+        #[clap(long, default_value = "6_18")]
+        kernel: String,
     },
     /// Build eBPF programs and run the userspace binary
     Run {
         /// Build in release mode
         #[clap(long)]
         release: bool,
+        /// Kernel version for struct offsets (e.g. "6_12", "6_18")
+        #[clap(long, default_value = "6_18")]
+        kernel: String,
         /// Arguments to pass to the binary
         #[clap(last = true)]
         run_args: Vec<String>,
@@ -30,15 +36,15 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli {
-        Cli::BuildEbpf { target, release } => build_ebpf(&target, release),
-        Cli::Run { release, run_args } => {
-            build_ebpf("bpfel-unknown-none", release)?;
+        Cli::BuildEbpf { target, release, kernel } => build_ebpf(&target, release, &kernel),
+        Cli::Run { release, kernel, run_args } => {
+            build_ebpf("bpfel-unknown-none", release, &kernel)?;
             run(release, &run_args)
         }
     }
 }
 
-fn build_ebpf(target: &str, _release: bool) -> Result<()> {
+fn build_ebpf(target: &str, _release: bool, kernel: &str) -> Result<()> {
     let workspace_root = workspace_root();
     let ebpf_dir = workspace_root.join("bpftop-ebpf");
 
@@ -47,6 +53,9 @@ fn build_ebpf(target: &str, _release: bool) -> Result<()> {
         "aarch64" => "arch-aarch64",
         other => bail!("unsupported architecture: {other}"),
     };
+
+    let kernel_feature = format!("kernel-{kernel}");
+    let features = format!("{arch_feature},{kernel_feature}");
 
     // eBPF programs MUST be built in release mode because debug builds
     // include core::fmt code that exceeds BPF's function argument limit.
@@ -61,7 +70,7 @@ fn build_ebpf(target: &str, _release: bool) -> Result<()> {
             "build-std=core",
             "--release",
             "--features",
-            arch_feature,
+            &features,
         ])
         .env(
             "CARGO_ENCODED_RUSTFLAGS",

@@ -10,28 +10,49 @@ use aya_ebpf::{
 use bpftop_common::{CmdlineEvent, NetStats, TaskInfo};
 
 // ============================================================
-// Kernel struct field byte offsets (Linux 6.12, from BTF)
+// Kernel struct field byte offsets (from BTF via pahole)
 // ============================================================
 //
 // Generated from: pahole -C <struct> /sys/kernel/btf/vmlinux
 // These are NOT portable across kernel versions. Without CO-RE
 // support in aya-ebpf, we must regenerate if the kernel changes.
 //
-// Build with --features arch-x86_64 or --features arch-aarch64.
+// Build with --features arch-{x86_64,aarch64} AND kernel-{6_12,6_18}.
 
 #[cfg(not(any(feature = "arch-x86_64", feature = "arch-aarch64")))]
 compile_error!("must enable exactly one of: arch-x86_64, arch-aarch64");
 
-// --- task_struct offsets ---
+#[cfg(not(any(feature = "kernel-6_12", feature = "kernel-6_18")))]
+compile_error!("must enable exactly one of: kernel-6_12, kernel-6_18");
 
-// Fields at identical offsets on both architectures (Linux 6.12):
-const TASK_STATE: usize = 24;       // __state: u32
-const TASK_PRIO: usize = 124;       // prio: i32
-const TASK_STATIC_PRIO: usize = 128; // static_prio: i32
+// --- Architecture-independent, kernel-independent constants ---
 
-#[cfg(feature = "arch-x86_64")]
+const TASK_STATE: usize = 24;       // task_struct.__state: u32
+const TASK_PRIO: usize = 124;       // task_struct.prio: i32
+const TASK_STATIC_PRIO: usize = 128; // task_struct.static_prio: i32
+
+const CRED_UID: usize = 8;          // cred.uid: kuid_t
+const CRED_EUID: usize = 24;        // cred.euid: kuid_t
+
+const CGROUP_KN: usize = 256;       // cgroup.kn: *kernfs_node
+const KN_ID: usize = 96;            // kernfs_node.id: u64
+
+const SOCK_BOUND_DEV_IF: usize = 20; // sock.__sk_common.skc_bound_dev_if: i32
+const DST_DEV: usize = 0;           // dst_entry.dev: *net_device
+const NETDEV_IFINDEX: usize = 224;  // net_device.ifindex: i32
+
+// --- Kernel-dependent, architecture-independent constants ---
+
+#[cfg(feature = "kernel-6_12")]
+const SOCK_DST_CACHE: usize = 528;  // sock.sk_dst_cache: *dst_entry
+#[cfg(feature = "kernel-6_18")]
+const SOCK_DST_CACHE: usize = 536;  // sock.sk_dst_cache: *dst_entry
+
+// --- Architecture-dependent AND kernel-dependent offsets ---
+
+#[cfg(all(feature = "arch-x86_64", feature = "kernel-6_12"))]
 mod offsets {
-    // task_struct
+    // task_struct (x86_64, Linux 6.12)
     pub const TASK_MM: usize = 1712;
     pub const TASK_PID: usize = 1840;
     pub const TASK_TGID: usize = 1844;
@@ -53,9 +74,33 @@ mod offsets {
     pub const CSS_SET_DFL_CGRP: usize = 136;
 }
 
-#[cfg(feature = "arch-aarch64")]
+#[cfg(all(feature = "arch-x86_64", feature = "kernel-6_18"))]
 mod offsets {
-    // task_struct
+    // task_struct (x86_64, Linux 6.18)
+    pub const TASK_MM: usize = 1728;
+    pub const TASK_PID: usize = 1856;
+    pub const TASK_TGID: usize = 1860;
+    pub const TASK_REAL_PARENT: usize = 1872;
+    pub const TASK_UTIME: usize = 2080;
+    pub const TASK_STIME: usize = 2088;
+    pub const TASK_START_TIME: usize = 2200;
+    pub const TASK_CRED: usize = 2384;
+    pub const TASK_COMM: usize = 2400;
+    pub const TASK_CGROUPS: usize = 2904;
+    // mm_struct (rss_stat is percpu_counter[4]; each 40 bytes, count at +8)
+    pub const MM_TOTAL_VM: usize = 360;
+    pub const MM_ARG_START: usize = 480;
+    pub const MM_ARG_END: usize = 488;
+    pub const MM_RSS_FILE_COUNT: usize = 936;  // rss_stat[0].count
+    pub const MM_RSS_ANON_COUNT: usize = 976;  // rss_stat[1].count
+    pub const MM_RSS_SHMEM_COUNT: usize = 1056; // rss_stat[3].count
+    // css_set
+    pub const CSS_SET_DFL_CGRP: usize = 144;
+}
+
+#[cfg(all(feature = "arch-aarch64", feature = "kernel-6_12"))]
+mod offsets {
+    // task_struct (aarch64, Linux 6.12)
     pub const TASK_MM: usize = 1616;
     pub const TASK_PID: usize = 1744;
     pub const TASK_TGID: usize = 1748;
@@ -77,23 +122,32 @@ mod offsets {
     pub const CSS_SET_DFL_CGRP: usize = 120;
 }
 
+#[cfg(all(feature = "arch-aarch64", feature = "kernel-6_18"))]
+mod offsets {
+    // task_struct (aarch64, Linux 6.18)
+    // TODO: these are placeholders copied from 6.12 — verify with pahole on aarch64 6.18
+    pub const TASK_MM: usize = 1616;
+    pub const TASK_PID: usize = 1744;
+    pub const TASK_TGID: usize = 1748;
+    pub const TASK_REAL_PARENT: usize = 1760;
+    pub const TASK_UTIME: usize = 1968;
+    pub const TASK_STIME: usize = 1976;
+    pub const TASK_START_TIME: usize = 2088;
+    pub const TASK_CRED: usize = 2272;
+    pub const TASK_COMM: usize = 2288;
+    pub const TASK_CGROUPS: usize = 2744;
+    // mm_struct
+    pub const MM_TOTAL_VM: usize = 232;
+    pub const MM_ARG_START: usize = 352;
+    pub const MM_ARG_END: usize = 360;
+    pub const MM_RSS_FILE_COUNT: usize = 792;
+    pub const MM_RSS_ANON_COUNT: usize = 832;
+    pub const MM_RSS_SHMEM_COUNT: usize = 912;
+    // css_set
+    pub const CSS_SET_DFL_CGRP: usize = 120;
+}
+
 use offsets::*;
-
-// cred (same on both architectures)
-const CRED_UID: usize = 8;          // uid: kuid_t
-const CRED_EUID: usize = 24;        // euid: kuid_t
-
-// cgroup (same on both architectures)
-const CGROUP_KN: usize = 256;       // kn: *kernfs_node
-
-// kernfs_node (same on both architectures)
-const KN_ID: usize = 96;            // id: u64
-
-// --- network struct offsets (same on both architectures, Linux 6.12) ---
-const SOCK_DST_CACHE: usize = 528;  // sock.sk_dst_cache: *dst_entry
-const SOCK_BOUND_DEV_IF: usize = 20; // sock.__sk_common.skc_bound_dev_if: i32
-const DST_DEV: usize = 0;           // dst_entry.dev: *net_device
-const NETDEV_IFINDEX: usize = 224;  // net_device.ifindex: i32
 
 // ============================================================
 // Helper: read a kernel field at a fixed byte offset
