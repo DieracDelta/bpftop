@@ -10,18 +10,14 @@ use aya::programs::{KProbe, TracePoint};
 use aya::{Btf, Ebpf};
 use bpftop_common::{CmdlineEvent, NetStats, TaskInfo};
 
-/// The compiled eBPF object. Built by xtask (cargo xtask build-ebpf)
-/// before the userspace crate is compiled.
+/// The compiled eBPF object. Built before the userspace crate is compiled.
 ///
 /// Path is relative to this source file:
 ///   loader.rs  ∈  bpftop/src/ebpf/
 ///   workspace root = ../../../
-///   eBPF binary    = bpftop-ebpf/target/bpfel-unknown-none/release/bpftop-ebpf
-///
-/// NOTE: eBPF programs MUST be built in release mode because debug builds
-/// include core::fmt code that exceeds BPF's function argument limit.
+///   eBPF object    = bpftop-ebpf-c/target/bpftop.bpf.o
 static BPF_OBJ: &[u8] =
-    aya::include_bytes_aligned!("../../../bpftop-ebpf/target/bpfel-unknown-none/release/bpftop-ebpf");
+    aya::include_bytes_aligned!("../../../bpftop-ebpf-c/target/bpftop.bpf.o");
 
 /// Manages eBPF program loading, attachment, and data retrieval.
 pub struct EbpfLoader {

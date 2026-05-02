@@ -34,56 +34,14 @@
             hash = "sha256-ECV4yHAsu/QX9YwT0jwV7lity0xtPnE+frc1CjHdSH4=";
           };
 
-          # Combined LLVM 22 (dev + lib outputs merged for bpf-linker's build script)
-          llvm22 = pkgs.symlinkJoin {
-            name = "llvm-22-combined";
-            paths = [ pkgs.llvmPackages_22.llvm.dev pkgs.llvmPackages_22.llvm.lib ];
-          };
-
-          # bpf-linker v0.10.1 with LLVM 22 (matches nightly Rust's LLVM)
-          bpfLinker = pkgs.rustPlatform.buildRustPackage rec {
-            pname = "bpf-linker";
-            version = "0.10.1";
-            src = pkgs.fetchFromGitHub {
-              owner = "aya-rs";
-              repo = "bpf-linker";
-              tag = "v${version}";
-              hash = "sha256-WFMQlaM18v5FsrsjmAl1nPGNMnBW3pjXmkfOfv3Izq0=";
-            };
-            cargoHash = "sha256-m/mlN1EL5jYxprNXvMbuVzBsewdIOFX0ebNQWfByEHQ=";
-            buildNoDefaultFeatures = true;
-            buildFeatures = [ "llvm-${pkgs.lib.versions.major pkgs.llvmPackages_22.llvm.version}" ];
-            LLVM_PREFIX = "${llvm22}";
-            nativeBuildInputs = [ llvm22 ];
-            buildInputs = [ pkgs.zlib pkgs.libxml2 ];
-            doCheck = false;
-          };
-
-          # Custom FOD: vendors eBPF deps + std library deps (needed for -Z build-std=core)
-          ebpfVendor = pkgs.stdenvNoCC.mkDerivation {
-            name = "bpftop-ebpf-vendor";
-            src = ./.;
-            postUnpack = "sourceRoot=$sourceRoot/bpftop-ebpf";
-            nativeBuildInputs = [ rustNightly pkgs.cacert ];
-            dontBuild = true;
-            dontFixup = true;
-            installPhase = ''
-              mkdir -p $out/.cargo
-              sysroot=$(rustc --print sysroot)
-              HOME=$(mktemp -d) cargo vendor \
-                --locked \
-                --sync "$sysroot/lib/rustlib/src/rust/library/Cargo.toml" \
-                $out 2>/dev/null > vendor-config.toml
-              sed "s|$out|@vendor@|g" vendor-config.toml > $out/.cargo/config.toml
-            '';
-            outputHashMode = "recursive";
-            outputHashAlgo = "sha256";
-            outputHash = "sha256-J7H0kMUUfLr0sesuIih9Dm5VOOd0w9u5nfwNjT+QDqI=";
-          };
           mkBpftop = { pname, rustToolchain, cargoTarget ? null, extraNativeBuildInputs ? [], env ? {} }:
             let
               targetFlag = if cargoTarget != null then "--target ${cargoTarget}" else "";
               outputDir = if cargoTarget != null then "target/${cargoTarget}/release" else "target/release";
+              bpfTargetArch = {
+                "x86_64-linux" = "x86";
+                "aarch64-linux" = "arm64";
+              }.${system};
             in pkgs.stdenv.mkDerivation ({
               inherit pname;
               version = "0.1.0";
@@ -91,9 +49,9 @@
 
               nativeBuildInputs = [
                 rustToolchain
-                bpfLinker
-                pkgs.llvmPackages_22.clang
+                pkgs.llvmPackages_22.clang-unwrapped
                 pkgs.llvmPackages_22.llvm
+                pkgs.libbpf
                 pkgs.pkg-config
               ] ++ extraNativeBuildInputs;
 
@@ -111,30 +69,20 @@
                 echo '[alias]' >> .cargo/config.toml
                 echo 'xtask = "run --package xtask --"' >> .cargo/config.toml
 
-                # Vendor eBPF deps + linker config
-                mkdir -p bpftop-ebpf/.cargo
-                substitute ${ebpfVendor}/.cargo/config.toml bpftop-ebpf/.cargo/config.toml \
-                  --subst-var-by vendor ${ebpfVendor}
-                echo '[target.bpfel-unknown-none]' >> bpftop-ebpf/.cargo/config.toml
-                echo 'linker = "bpf-linker"' >> bpftop-ebpf/.cargo/config.toml
-                echo 'rustflags = ["-Clink-arg=--btf"]' >> bpftop-ebpf/.cargo/config.toml
-
                 runHook postConfigure
               '';
 
-              buildPhase = let
-                archFeature = {
-                  "x86_64-linux" = "arch-x86_64";
-                  "aarch64-linux" = "arch-aarch64";
-                }.${system};
-                kernelFeature = "kernel-6_18";
-              in ''
+              buildPhase = ''
                 runHook preBuild
 
-                # Phase 1: Build eBPF object
-                pushd bpftop-ebpf
-                cargo build --target bpfel-unknown-none -Z build-std=core --release --features ${archFeature},${kernelFeature}
-                popd
+                # Phase 1: Build CO-RE eBPF object. Field offsets are relocated
+                # by Aya at load time from the running kernel's BTF.
+                mkdir -p bpftop-ebpf-c/target
+                clang -target bpf -D__TARGET_ARCH_${bpfTargetArch} -g -O2 -Wall -Werror \
+                  -I bpftop-ebpf-c \
+                  -I ${pkgs.libbpf}/include \
+                  -c bpftop-ebpf-c/bpftop.bpf.c \
+                  -o bpftop-ebpf-c/target/bpftop.bpf.o
 
                 # Phase 2: Build userspace (embeds eBPF via include_bytes_aligned!)
                 cargo build --release --bin bpftop ${targetFlag}
@@ -198,6 +146,7 @@
             # eBPF tooling
             llvmPackages.clang
             llvmPackages.llvm
+            libbpf
             bpftools
             # Build deps
             pkg-config

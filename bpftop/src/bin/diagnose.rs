@@ -16,7 +16,7 @@ use bpftop_common::{CmdlineEvent, TaskInfo};
 /// Path relative to this file (src/bin/diagnose.rs):
 ///   ../../../../bpftop-ebpf/target/bpfel-unknown-none/release/bpftop-ebpf
 static BPF_OBJ: &[u8] =
-    aya::include_bytes_aligned!("../../../bpftop-ebpf/target/bpfel-unknown-none/release/bpftop-ebpf");
+    aya::include_bytes_aligned!("../../../bpftop-ebpf-c/target/bpftop.bpf.o");
 
 fn main() {
     let mut pass = 0u32;

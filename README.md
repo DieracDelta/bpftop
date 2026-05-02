@@ -127,11 +127,9 @@ We have a two-phase build. The eBPF program compiles for `bpfel-unknown-none` wi
 
 The nix package builds bpf-linker v0.10.1 from source against LLVM 22. nixpkgs ships 0.9.15 with LLVM 21 which can't read objects produced by the newer LLVM.
 
-# Limitations
+# eBPF build
 
-Kernel struct offsets (`task_struct`, `mm_struct`, `sock`, etc.) are hardcoded per architecture. Build with `--features arch-x86_64` or `--features arch-aarch64`. May break across kernel versions if layouts change.
-
-The right fix is CO-RE (resolve offsets from the target kernel's BTF at load time). Aya's loader supports CO-RE relocations but aya-ebpf can't emit them — rustc doesn't expose `__builtin_preserve_access_index`. Tracked at https://github.com/aya-rs/aya/issues/349.
+The kernel-facing eBPF program is written in C and built as a CO-RE object. Kernel struct fields (`task_struct`, `mm_struct`, `sock`, etc.) are read through BTF relocations at load time, so the binary is not tied to a single kernel's byte offsets. Userspace stays Rust/Aya and embeds the compiled C object via `include_bytes_aligned!`.
 
 Network stats (NET/s, NET TOT) are cumulative since bpftop was started, not since process start. There's no kernel-level per-process network accounting, so we use kprobes on tcp/udp send/recv. A daemon that runs at boot would give lifetime stats, but that's a different tool.
 
