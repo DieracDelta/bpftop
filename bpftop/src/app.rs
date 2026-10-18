@@ -134,7 +134,10 @@ impl App {
         let show_kernel_threads = config.general.show_kernel_threads;
         let (ebpf, ebpf_error) = match EbpfLoader::load() {
             Ok(loader) => {
-                log::info!("eBPF programs loaded successfully");
+                log::info!(
+                    "eBPF programs loaded successfully (network probes: {:?})",
+                    loader.net_probe_mode
+                );
                 (loader, None)
             }
             Err(e) => {

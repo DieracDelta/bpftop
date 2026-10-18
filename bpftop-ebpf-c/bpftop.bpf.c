@@ -370,4 +370,60 @@ int kretprobe_udp_recvmsg(struct pt_regs *ctx)
 	return 0;
 }
 
+/*
+ * fexit variants of the probes above, preferred by the loader. One BPF
+ * trampoline call per send/recv instead of kprobe + kretprobe, no
+ * RECV_SOCK_STASH round trip, and TX counts bytes actually sent rather
+ * than requested. Return values come from bpf_get_func_ret (5.17+) so
+ * the programs don't depend on the arg count, which changed for
+ * tcp/udp_recvmsg in 5.19.
+ */
+static __always_inline int func_ret(void *ctx)
+{
+	u64 ret = 0;
+
+	bpf_get_func_ret(ctx, &ret);
+	return (int)ret;
+}
+
+SEC("fexit/tcp_sendmsg")
+int BPF_PROG(fexit_tcp_sendmsg, struct sock *sk)
+{
+	int ret = func_ret(ctx);
+
+	if (ret > 0)
+		account_tx(ret, sk);
+	return 0;
+}
+
+SEC("fexit/udp_sendmsg")
+int BPF_PROG(fexit_udp_sendmsg, struct sock *sk)
+{
+	int ret = func_ret(ctx);
+
+	if (ret > 0)
+		account_tx(ret, sk);
+	return 0;
+}
+
+SEC("fexit/tcp_recvmsg")
+int BPF_PROG(fexit_tcp_recvmsg, struct sock *sk)
+{
+	int ret = func_ret(ctx);
+
+	if (ret > 0)
+		account_rx(ret, sk);
+	return 0;
+}
+
+SEC("fexit/udp_recvmsg")
+int BPF_PROG(fexit_udp_recvmsg, struct sock *sk)
+{
+	int ret = func_ret(ctx);
+
+	if (ret > 0)
+		account_rx(ret, sk);
+	return 0;
+}
+
 char LICENSE[] SEC("license") = "GPL";

@@ -4,7 +4,7 @@ use std::io::{ErrorKind, Read};
 use anyhow::{Context, Result};
 use aya::maps::HashMap as BpfHashMap;
 use aya::programs::iter::{Iter, IterLink};
-use aya::programs::{KProbe, TracePoint};
+use aya::programs::{FExit, KProbe, TracePoint};
 use aya::{Btf, Ebpf};
 use bpftop_common::{parse_iter_records, CmdlineEvent, IterRecords};
 
@@ -22,7 +22,7 @@ static BPF_OBJ: &[u8] =
 const ITER_READ_CHUNK: usize = 64 * 1024;
 
 /// Kernel functions traced for per-process network bytes, with the
-/// kprobe/kretprobe pair that implements each.
+/// fexit program and the kprobe/kretprobe pair that implement each.
 const NET_PROBES: &[(&str, &str, Option<&str>)] = &[
     ("tcp_sendmsg", "kprobe_tcp_sendmsg", None),
     ("udp_sendmsg", "kprobe_udp_sendmsg", None),
@@ -30,9 +30,19 @@ const NET_PROBES: &[(&str, &str, Option<&str>)] = &[
     ("udp_recvmsg", "kprobe_udp_recvmsg", Some("kretprobe_udp_recvmsg")),
 ];
 
+/// How the network accounting programs are attached.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NetProbeMode {
+    /// BPF trampolines (5.17+; arm64 6.0+). Cheapest per send/recv.
+    FExit,
+    /// kprobe + kretprobe fallback for kernels without fexit support.
+    KProbe,
+}
+
 /// Manages eBPF program loading, attachment, and data retrieval.
 pub struct EbpfLoader {
     bpf: Option<Ebpf>,
+    pub net_probe_mode: Option<NetProbeMode>,
     /// Iterator output buffer, reused across cycles.
     iter_buf: Vec<u8>,
 }
@@ -75,15 +85,34 @@ impl EbpfLoader {
             .attach("sched", "sched_process_exit")
             .context("attaching cleanup_cmdline")?;
 
-        // Load and attach network kprobes/kretprobes
-        attach_net_kprobes(&mut bpf)?;
+        // Network accounting: fexit where the kernel supports it, else
+        // kprobes. BPFTOP_NET_PROBES=kprobe forces the fallback.
+        let force_kprobe = std::env::var("BPFTOP_NET_PROBES").is_ok_and(|v| v == "kprobe");
+        let fexit = if force_kprobe {
+            Err(anyhow::anyhow!("disabled by BPFTOP_NET_PROBES=kprobe"))
+        } else {
+            attach_net_fexit(&mut bpf, &btf)
+        };
+        let net_probe_mode = match fexit {
+            Ok(()) => NetProbeMode::FExit,
+            Err(e) => {
+                log::info!("fexit network probes unavailable ({e:#}); using kprobes");
+                unload_net_fexit(&mut bpf);
+                attach_net_kprobes(&mut bpf)?;
+                NetProbeMode::KProbe
+            }
+        };
 
-        Ok(Self { bpf: Some(bpf), iter_buf: Vec::new() })
+        Ok(Self {
+            bpf: Some(bpf),
+            net_probe_mode: Some(net_probe_mode),
+            iter_buf: Vec::new(),
+        })
     }
 
     /// Create a no-op loader (used as placeholder after moving the real one).
     pub fn noop() -> Self {
-        Self { bpf: None, iter_buf: Vec::new() }
+        Self { bpf: None, net_probe_mode: None, iter_buf: Vec::new() }
     }
 
     pub fn is_loaded(&self) -> bool {
@@ -184,6 +213,37 @@ impl EbpfLoader {
         hash.insert(&pid, &event, 0)
             .context("inserting into CMDLINE_MAP")?;
         Ok(())
+    }
+}
+
+fn attach_net_fexit(bpf: &mut Ebpf, btf: &Btf) -> Result<()> {
+    // Load (verify) all programs before attaching any, so a failure
+    // can't leave a mix of fexit and kprobe accounting the same calls.
+    for &(func, _, _) in NET_PROBES {
+        let name = format!("fexit_{func}");
+        let prog: &mut FExit = bpf
+            .program_mut(&name)
+            .with_context(|| format!("{name} not found"))?
+            .try_into()
+            .with_context(|| format!("{name} is not an FExit"))?;
+        prog.load(func, btf).with_context(|| format!("loading {name}"))?;
+    }
+    for &(func, _, _) in NET_PROBES {
+        let name = format!("fexit_{func}");
+        let prog: &mut FExit = bpf.program_mut(&name).unwrap().try_into()?;
+        prog.attach().with_context(|| format!("attaching {name}"))?;
+    }
+    Ok(())
+}
+
+fn unload_net_fexit(bpf: &mut Ebpf) {
+    for &(func, _, _) in NET_PROBES {
+        let prog: Option<&mut FExit> = bpf
+            .program_mut(&format!("fexit_{func}"))
+            .and_then(|p| p.try_into().ok());
+        if let Some(prog) = prog {
+            let _ = prog.unload();
+        }
     }
 }
 
