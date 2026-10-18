@@ -224,8 +224,7 @@ impl Collector {
 
             // CPU time: BPF gives nanoseconds; convert to ticks equivalent for delta.
             // Whole thread group: leader + exited threads + live threads.
-            let total_cpu_ns = task.utime_ns
-                + task.stime_ns
+            let total_cpu_ns = task.cpu_ns
                 + records.thread_cpu_ns.get(&task.pid).copied().unwrap_or(0);
             let prev_cpu_ns = self
                 .prev_proc_times

@@ -24,8 +24,8 @@ struct task_info {
 	u32 ruid;
 	/* __state | exit_state: raw kernel TASK_* / EXIT_* bits */
 	u32 state;
-	u64 utime_ns;
-	u64 stime_ns;
+	/* se.sum_exec_runtime: leader + already-exited threads */
+	u64 cpu_ns;
 	u64 vsize_pages;
 	u64 rss_pages;
 	u64 start_time_ns;
@@ -62,7 +62,7 @@ struct cmdline_event {
 };
 
 /* Keep in sync with bpftop-common/src/lib.rs (asserted on both sides). */
-_Static_assert(sizeof(struct task_info) == 144, "task_info ABI");
+_Static_assert(sizeof(struct task_info) == 136, "task_info ABI");
 _Static_assert(sizeof(struct cmdline_event) == 272, "cmdline_event ABI");
 _Static_assert(sizeof(struct thread_cpu) == 16, "thread_cpu ABI");
 
@@ -143,18 +143,17 @@ int dump_task(struct bpf_iter__task *ctx)
 		struct thread_cpu tc = {
 			.pid = info.pid,
 			.tid = info.tid,
-			.cpu_ns = task->utime + task->stime,
+			.cpu_ns = task->se.sum_exec_runtime,
 		};
 		bpf_seq_write(ctx->meta->seq, &tc, sizeof(tc));
 		return 0;
 	}
 
 	struct signal_struct *sig = task->signal;
-	u64 dead_utime = 0, dead_stime = 0;
+	u64 dead_runtime = 0;
 	if (sig) {
 		info.nr_threads = sig->nr_threads;
-		dead_utime = sig->utime;
-		dead_stime = sig->stime;
+		dead_runtime = sig->sum_sched_runtime;
 	}
 
 	struct task_struct *parent = task->real_parent;
@@ -169,10 +168,10 @@ int dump_task(struct bpf_iter__task *ctx)
 
 	info.state = task->__state | (u32)task->exit_state;
 	info.kthread = (task->flags & PF_KTHREAD) != 0;
-	/* Leader's own time plus that of already-exited threads, which the
+	/* Scheduler runtime (ns-accurate, unlike tick-sampled utime/stime):
+	 * the leader's own plus that of already-exited threads, which the
 	 * kernel folds into signal_struct. Live threads arrive as thread_cpu. */
-	info.utime_ns = task->utime + dead_utime;
-	info.stime_ns = task->stime + dead_stime;
+	info.cpu_ns = task->se.sum_exec_runtime + dead_runtime;
 	info.prio = task->prio;
 	info.static_prio = task->static_prio;
 

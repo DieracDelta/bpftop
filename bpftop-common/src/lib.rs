@@ -15,11 +15,9 @@ pub struct TaskInfo {
     pub ruid: u32,
     /// `__state | exit_state`: the kernel's raw TASK_*/EXIT_* bits.
     pub state: u32,
-    /// User CPU time in nanoseconds: the leader's plus exited threads'.
-    /// Live threads' time arrives separately as `ThreadCpu` records.
-    pub utime_ns: u64,
-    /// System CPU time in nanoseconds (same scope as `utime_ns`)
-    pub stime_ns: u64,
+    /// Scheduler runtime (`se.sum_exec_runtime`) in ns: the leader's plus
+    /// exited threads'. Live threads' time arrives as `ThreadCpu` records.
+    pub cpu_ns: u64,
     /// Virtual memory size in pages (mm->total_vm)
     pub vsize_pages: u64,
     /// Resident set size in pages
@@ -85,7 +83,7 @@ pub struct NetStats {
 }
 
 // Keep in sync with bpftop-ebpf-c/bpftop.bpf.c (asserted on both sides).
-const _: () = assert!(core::mem::size_of::<TaskInfo>() == 144);
+const _: () = assert!(core::mem::size_of::<TaskInfo>() == 136);
 const _: () = assert!(core::mem::size_of::<CmdlineEvent>() == 272);
 const _: () = assert!(core::mem::size_of::<ThreadCpu>() == 16);
 

@@ -69,8 +69,11 @@ struct css_set {
 struct signal_struct {
 	atomic_t live;
 	int nr_threads;
-	u64 utime;
-	u64 stime;
+	unsigned long long sum_sched_runtime;
+};
+
+struct sched_entity {
+	u64 sum_exec_runtime;
 };
 
 struct task_struct {
@@ -83,8 +86,7 @@ struct task_struct {
 	pid_t pid;
 	pid_t tgid;
 	struct task_struct *real_parent;
-	u64 utime;
-	u64 stime;
+	struct sched_entity se;
 	u64 start_time;
 	const struct cred *cred;
 	char comm[16];
