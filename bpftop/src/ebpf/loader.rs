@@ -181,7 +181,9 @@ impl EbpfLoader {
     }
 
     /// Look up a cmdline for a PID from the BPF CMDLINE_MAP, returning the
-    /// entry's generation along with it.
+    /// entry's generation along with it. Entries are capped at 255 bytes;
+    /// longer cmdlines are read from /proc (once per exec, since callers
+    /// cache by generation).
     pub fn get_cmdline(&self, pid: u32) -> Option<(u64, String)> {
         let bpf = self.bpf.as_ref()?;
         let map = bpf.map("CMDLINE_MAP")?;
@@ -189,8 +191,12 @@ impl EbpfLoader {
         let event = hash.get(&pid, 0).ok()?;
 
         let len = (event.len as usize).min(event.cmdline.len());
-        let raw = &event.cmdline[..len];
-        let s = display_text(raw);
+        if event.full_len as usize > len {
+            if let Some(full) = read_proc_cmdline(pid) {
+                return Some((event.gen, full));
+            }
+        }
+        let s = display_text(&event.cmdline[..len]);
         if s.is_empty() {
             None
         } else {
@@ -215,12 +221,15 @@ impl EbpfLoader {
             len: 0,
             cmdline: [0u8; 256],
             // Exec'd entries use ktime, which is never 1.
-            gen: 1,
+            gen: SEEDED_GEN,
+            full_len: 0,
+            _pad: 0,
         };
         let bytes = cmdline.as_bytes();
         let copy_len = bytes.len().min(255);
         event.cmdline[..copy_len].copy_from_slice(&bytes[..copy_len]);
         event.len = copy_len as u32;
+        event.full_len = bytes.len().try_into().unwrap_or(u32::MAX);
 
         hash.insert(&pid, &event, 0)
             .context("inserting into CMDLINE_MAP")?;
@@ -314,13 +323,24 @@ fn attach_kprobes(bpf: &mut Ebpf, probe: &NetProbe) -> Result<()> {
     Ok(())
 }
 
+/// Generation of CMDLINE_MAP entries seeded from /proc at startup.
+pub const SEEDED_GEN: u64 = 1;
+
+fn read_proc_cmdline(pid: u32) -> Option<String> {
+    let s = display_text(&fs::read(format!("/proc/{pid}/cmdline")).ok()?);
+    (!s.is_empty()).then_some(s)
+}
+
 /// One-shot scan of /proc/*/cmdline to seed the CMDLINE_MAP for
 /// processes that were already running before the BPF tracepoints
-/// were attached. After this, no per-PID /proc reads occur.
-pub fn seed_cmdlines_from_proc(loader: &mut EbpfLoader) {
+/// were attached. Returns the full (untruncated) cmdlines so the caller
+/// can cache them under `SEEDED_GEN`. After this, /proc is only read for
+/// cmdlines longer than a map entry, once per exec.
+pub fn seed_cmdlines_from_proc(loader: &mut EbpfLoader) -> Vec<(u32, String)> {
+    let mut seeded = Vec::new();
     let entries = match fs::read_dir("/proc") {
         Ok(e) => e,
-        Err(_) => return,
+        Err(_) => return seeded,
     };
     for entry in entries {
         let entry = match entry {
@@ -334,13 +354,12 @@ pub fn seed_cmdlines_from_proc(loader: &mut EbpfLoader) {
             Err(_) => continue,
         };
 
-        let cmdline = match fs::read(format!("/proc/{pid}/cmdline")) {
-            Ok(raw) => display_text(&raw),
-            Err(_) => continue,
-        };
-        if cmdline.is_empty() {
+        let Some(cmdline) = read_proc_cmdline(pid) else {
             continue;
+        };
+        if loader.seed_cmdline(pid, &cmdline).is_ok() {
+            seeded.push((pid, cmdline));
         }
-        let _ = loader.seed_cmdline(pid, &cmdline);
     }
+    seeded
 }

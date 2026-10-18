@@ -65,8 +65,13 @@ impl Collector {
 
         // One-shot /proc/*/cmdline scan to seed the BPF map for
         // processes already running before tracepoints were attached.
+        // The full strings prime the cmdline cache, so the first refresh
+        // needs no CMDLINE_MAP lookups for these processes.
+        let mut cmdline_cache = HashMap::new();
         if ebpf.is_loaded() {
-            loader::seed_cmdlines_from_proc(&mut ebpf);
+            for (pid, cmdline) in loader::seed_cmdlines_from_proc(&mut ebpf) {
+                cmdline_cache.insert(pid, (loader::SEEDED_GEN, Text::from(cmdline)));
+            }
         }
 
         let mut system = SystemReader::new()
@@ -85,7 +90,7 @@ impl Collector {
             ebpf,
             system,
             cgroup_resolver: CgroupResolver::new(),
-            cmdline_cache: HashMap::new(),
+            cmdline_cache,
             username_cache: HashMap::new(),
             username_cache_time: Instant::now(),
             no_ifname: Text::from(""),

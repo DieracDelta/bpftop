@@ -59,11 +59,14 @@ struct cmdline_event {
 	u8 cmdline[256];
 	/* Changes on every exec; lets userspace refetch only changed cmdlines. */
 	u64 gen;
+	/* Untruncated length; > len means userspace should read /proc. */
+	u32 full_len;
+	u32 _pad;
 };
 
 /* Keep in sync with bpftop-common/src/lib.rs (asserted on both sides). */
 _Static_assert(sizeof(struct task_info) == 136, "task_info ABI");
-_Static_assert(sizeof(struct cmdline_event) == 272, "cmdline_event ABI");
+_Static_assert(sizeof(struct cmdline_event) == 280, "cmdline_event ABI");
 _Static_assert(sizeof(struct thread_cpu) == 16, "thread_cpu ABI");
 
 struct net_stats {
@@ -230,6 +233,7 @@ int capture_cmdline(void *ctx)
 	event.gen = bpf_ktime_get_ns();
 
 	u64 len = arg_end - arg_start;
+	event.full_len = len > 0xffffffff ? 0xffffffff : (u32)len;
 	if (len > 255)
 		len = 255;
 

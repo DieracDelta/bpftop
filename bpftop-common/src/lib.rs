@@ -70,6 +70,9 @@ pub struct CmdlineEvent {
     pub cmdline: [u8; 256],
     /// Changes on every exec (ktime at exec; 1 for startup-seeded entries).
     pub gen: u64,
+    /// Untruncated cmdline length; `> len` means `cmdline` was cut short.
+    pub full_len: u32,
+    pub _pad: u32,
 }
 
 /// Per-process network I/O stats collected by kprobes on tcp/udp send/recv.
@@ -84,7 +87,7 @@ pub struct NetStats {
 
 // Keep in sync with bpftop-ebpf-c/bpftop.bpf.c (asserted on both sides).
 const _: () = assert!(core::mem::size_of::<TaskInfo>() == 136);
-const _: () = assert!(core::mem::size_of::<CmdlineEvent>() == 272);
+const _: () = assert!(core::mem::size_of::<CmdlineEvent>() == 280);
 const _: () = assert!(core::mem::size_of::<ThreadCpu>() == 16);
 
 /// Parsed output of one task iterator walk.
