@@ -1,0 +1,58 @@
+# Forgejo CI. Its presence also stops Forgejo from running
+# .github/workflows (only the first workflow directory found is used),
+# which targets GitHub runners and actions.
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - master
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  FORGEJO_GIT_URL: http://127.0.0.1:3010
+
+jobs:
+  check:
+    name: ${{ matrix.check }}
+    runs-on: jrestivo-workstation-local
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        check:
+          - build
+          - test
+    steps:
+      - name: Checkout
+        env:
+          REPOSITORY: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
+          REVISION: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          set -euo pipefail
+          git init .
+          git remote add origin "${FORGEJO_GIT_URL}/${REPOSITORY}.git"
+          git -c http."${FORGEJO_GIT_URL}/".extraheader= \
+            fetch --depth=1 origin "$REVISION"
+          git checkout --detach FETCH_HEAD
+
+      - name: Build packages
+        if: matrix.check == 'build'
+        run: nix build --no-link -L .#default .#static .#bench
+
+      # The root VM test (.#checks.x86_64-linux.bench-vm) is left to manual
+      # runs: it takes ~15 minutes when the host has no KVM.
+      - name: Unit tests and clippy
+        if: matrix.check == 'test'
+        run: |
+          set -euo pipefail
+          nix develop --command bash -c '
+            set -euo pipefail
+            cargo xtask build-ebpf
+            cargo test --release --workspace
+            cargo clippy --release --workspace --all-targets -- -D warnings
+          '
