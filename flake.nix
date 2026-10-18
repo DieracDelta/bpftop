@@ -143,7 +143,13 @@
 
       # Root-in-a-VM collection benchmark: `nix build .#checks.x86_64-linux.bench-vm`
       # Results (bench JSON + strace syscall counts) land in ./result/results.
-      checks = forAllSystems ({ pkgs, system }: {
+      checks = forAllSystems ({ pkgs, system }:
+        let
+          netbench = pkgs.runCommandCC "netbench" { } ''
+            mkdir -p $out/bin
+            $CC -O2 -Wall -o $out/bin/netbench ${./bench/netbench.c}
+          '';
+        in {
         bench-vm = pkgs.testers.runNixOSTest {
           name = "bpftop-bench-vm";
           nodes.machine = { pkgs, ... }: {
@@ -158,6 +164,7 @@
               self.packages.${system}.bench
               pkgs.strace
               pkgs.python3
+              netbench
             ];
           };
           testScript = ''
@@ -188,6 +195,62 @@
             machine.succeed("strace -f -c -S calls -o /tmp/results/strace_1.txt bench --iterations 1 --warmup 0")
             machine.succeed("strace -f -c -S calls -o /tmp/results/strace_6.txt bench --iterations 6 --warmup 0")
             print(machine.succeed("cat /tmp/results/workload.txt; head -c 1500 /tmp/results/bench.json | tail -c 600; head -20 /tmp/results/strace_6.txt"))
+
+            # ── Functional checks of the collected data ──────────────
+            # Spawns and reaps a thread (and sends UDP) every 200ms, so thread
+            # exits happen while BPF is loaded; the cmdline must survive them.
+            machine.succeed(
+                "systemd-run --unit=threadexit --uid=bench3 ${pkgs.python3}/bin/python3 -c "
+                "'#marker-threadexit\n"
+                "import socket,threading,time\n"
+                "r=socket.socket(socket.AF_INET,socket.SOCK_DGRAM); r.bind((\"127.0.0.1\",0))\n"
+                "s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM); s.connect(r.getsockname())\n"
+                "while True:\n"
+                " t=threading.Thread(target=lambda:None); t.start(); t.join()\n"
+                " s.send(b\"x\"*100); r.recv(200); time.sleep(0.2)'"
+            )
+            # All CPU on a worker thread; the leader only sleeps.
+            machine.succeed(
+                "systemd-run --unit=busythread ${pkgs.python3}/bin/python3 -c "
+                "'import threading,time\n"
+                "threading.Thread(target=lambda: any(iter(int, 1)), daemon=True).start()\n"
+                "time.sleep(1e9)' marker-busythread"
+            )
+            machine.succeed("systemd-run --unit=freezeme ${pkgs.coreutils}/bin/sleep 100001")
+            machine.wait_until_succeeds("systemctl is-active freezeme threadexit")
+            machine.succeed("echo 1 > /sys/fs/cgroup/system.slice/freezeme.service/cgroup.freeze")
+            # Execs after BPF loads (during --settle-ms): cmdline comes from the exec tracepoint.
+            machine.succeed("systemd-run --unit=execer ${pkgs.bash}/bin/bash -c '${pkgs.coreutils}/bin/sleep 10; exec ${pkgs.python3}/bin/python3 -c \"import time; time.sleep(1e9)\" marker-exec'")
+            dump = machine.succeed("bench --dump --settle-ms 15000 --warmup 1 --iterations 1 --interval-ms 1000 | tee /tmp/results/dump.tsv")
+            rows = [l.split("\t", 7) for l in dump.splitlines() if l.count("\t") >= 7]
+            def find(marker):
+                hits = [r for r in rows if marker in r[7]]
+                assert hits, f"no process with cmdline containing {marker!r}"
+                return hits[0]
+            r = find("marker-threadexit")
+            assert r[1] == "bench3", f"user: {r}"
+            assert int(r[3]) > 0 and int(r[4]) > 0 and r[5] == "lo", f"net: {r}"
+            assert find("sleep 100001")[2] == "1", "freezeme should be frozen"
+            assert find("marker-exec")[2] == "0"
+            # CPU% must include non-leader threads (was leader-only).
+            assert float(find("marker-busythread")[6]) > 50, find("marker-busythread")
+            assert sum(r[2] == "1" for r in rows) == 1, "only freezeme is frozen"
+            machine.succeed("echo 0 > /sys/fs/cgroup/system.slice/freezeme.service/cgroup.freeze")
+
+            # ── Network probe overhead on other processes ────────────
+            def netbench(tag):
+                machine.succeed(f"for i in 1 2 3 4 5; do netbench 50000; done > /tmp/results/net_{tag}.txt")
+            netbench("none")
+            for mode in ["kprobe", "fexit"]:
+                env = "--setenv=BPFTOP_NET_PROBES=kprobe" if mode == "kprobe" else ""
+                machine.succeed(f"systemd-run --unit=hold-{mode} {env} $(command -v bench) --hold 600")
+                machine.wait_until_succeeds(f"journalctl -u hold-{mode} | grep -q holding")
+                print(machine.succeed(f"journalctl -u hold-{mode} | grep holding"))
+                netbench(mode)
+                machine.succeed(f"systemctl stop hold-{mode}")
+            netbench("none2")
+            print(machine.succeed("grep -H . /tmp/results/net_*.txt"))
+
             machine.copy_from_machine("/tmp/results", "")
           '';
         };

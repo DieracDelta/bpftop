@@ -37,6 +37,25 @@ struct Cli {
     /// Output results as JSON
     #[arg(long)]
     json: bool,
+
+    /// Only load and attach the BPF programs, then idle this many seconds
+    /// (for measuring probe overhead on other workloads)
+    #[arg(long)]
+    hold: Option<u64>,
+
+    /// Wait this long after loading before collecting, so BPF programs
+    /// observe some activity first
+    #[arg(long, default_value_t = 0)]
+    settle_ms: u64,
+
+    /// Sleep between timed iterations (gives CPU% a real interval)
+    #[arg(long, default_value_t = 0)]
+    interval_ms: u64,
+
+    /// Print the last cycle's processes as TSV instead of timing results:
+    /// pid, user, frozen, net_tx, net_rx, net_if, cpu_percent, cmdline
+    #[arg(long)]
+    dump: bool,
 }
 
 #[derive(Serialize)]
@@ -45,6 +64,7 @@ struct BenchResult {
     warmup: usize,
     process_count: usize,
     task_count: u32,
+    net_probe_mode: String,
     timings_us: Vec<f64>,
     stats: Stats,
     /// Median wall time per collect() phase.
@@ -87,7 +107,14 @@ fn main() -> Result<()> {
 
     eprintln!("Loading eBPF programs...");
     let loader = EbpfLoader::load().context("loading eBPF")?;
+    let net_probe_mode = format!("{:?}", loader.net_probe_mode.unwrap());
+    if let Some(secs) = cli.hold {
+        eprintln!("BPF loaded (network probes: {net_probe_mode}); holding for {secs}s");
+        std::thread::sleep(Duration::from_secs(secs));
+        return Ok(());
+    }
     let mut collector = Collector::new(loader);
+    std::thread::sleep(Duration::from_millis(cli.settle_ms));
 
     eprintln!("BPF loaded. Running {} warmup iterations...", cli.warmup);
     for _ in 0..cli.warmup {
@@ -98,8 +125,12 @@ fn main() -> Result<()> {
     let mut phases = Vec::with_capacity(cli.iterations);
     let mut process_count = 0;
     let mut task_count = 0;
+    let mut last_procs = Vec::new();
 
     for i in 0..cli.iterations {
+        if cli.interval_ms > 0 {
+            std::thread::sleep(Duration::from_millis(cli.interval_ms));
+        }
         let start = Instant::now();
         let (sys, procs) = collector.collect()?;
         let elapsed = start.elapsed();
@@ -108,6 +139,7 @@ fn main() -> Result<()> {
         task_count = sys.total_tasks + sys.user_threads + sys.kernel_threads;
         timings_us.push(us(elapsed));
         phases.push(collector.last_timings);
+        last_procs = procs;
 
         if !cli.json && (i + 1) % 10 == 0 {
             eprintln!(
@@ -120,11 +152,30 @@ fn main() -> Result<()> {
         }
     }
 
+    if cli.dump {
+        let clean = |s: &str| s.replace(|c: char| c.is_control(), " ");
+        for p in &last_procs {
+            println!(
+                "{}\t{}\t{}\t{}\t{}\t{}\t{:.1}\t{}",
+                p.pid,
+                p.user,
+                p.frozen as u8,
+                p.net_tx_bytes,
+                p.net_rx_bytes,
+                p.net_ifname,
+                p.cpu_percent,
+                clean(&p.cmdline)
+            );
+        }
+        return Ok(());
+    }
+
     let result = BenchResult {
         iterations: cli.iterations,
         warmup: cli.warmup,
         process_count,
         task_count,
+        net_probe_mode,
         stats: compute_stats(&timings_us),
         phases_median_us: median_phases(&phases),
         timings_us,
@@ -139,6 +190,7 @@ fn main() -> Result<()> {
         eprintln!("Iterations:    {}", result.iterations);
         eprintln!("Processes:     {}", result.process_count);
         eprintln!("Tasks:         {}", result.task_count);
+        eprintln!("Net probes:    {}", result.net_probe_mode);
         eprintln!("Min:    {:.1} µs", result.stats.min_us);
         eprintln!("Median: {:.1} µs", result.stats.median_us);
         eprintln!("P95:    {:.1} µs", result.stats.p95_us);
