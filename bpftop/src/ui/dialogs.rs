@@ -65,6 +65,7 @@ impl<'a> Widget for HelpDialog<'a> {
             ("M", "Sort by MEM%"),
             ("T", "Sort by TIME"),
             ("N", "Toggle network columns"),
+            ("D", "Toggle disk I/O columns"),
             ("gG", "Toggle GPU columns"),
             ("W", "Sort by GPU MEM"),
             ("I", "Invert sort order"),

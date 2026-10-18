@@ -16,6 +16,14 @@ typedef long long __s64;
 #define NULL ((void *)0)
 #define PF_KTHREAD 0x00200000
 
+/* /proc/<pid>/io style counters: storage bytes and read/write syscalls. */
+struct io_counters {
+	u64 read_bytes;
+	u64 write_bytes;
+	u64 syscr;
+	u64 syscw;
+};
+
 struct task_info {
 	u32 pid;
 	u32 tid;
@@ -39,6 +47,8 @@ struct task_info {
 	u64 net_rx_bytes;
 	u32 net_ifindex;
 	u32 nr_threads;
+	/* I/O counters: leader + already-exited threads */
+	struct io_counters io;
 	u8 frozen;
 	u8 kthread;
 	u8 _pad2[6];
@@ -54,6 +64,7 @@ struct thread_rec {
 	u32 state;
 	u32 _pad;
 	char comm[16];
+	struct io_counters io;
 };
 
 struct cmdline_event {
@@ -68,9 +79,9 @@ struct cmdline_event {
 };
 
 /* Keep in sync with bpftop-common/src/lib.rs (asserted on both sides). */
-_Static_assert(sizeof(struct task_info) == 136, "task_info ABI");
+_Static_assert(sizeof(struct task_info) == 168, "task_info ABI");
 _Static_assert(sizeof(struct cmdline_event) == 280, "cmdline_event ABI");
-_Static_assert(sizeof(struct thread_rec) == 40, "thread_rec ABI");
+_Static_assert(sizeof(struct thread_rec) == 72, "thread_rec ABI");
 
 struct net_stats {
 	u64 tx_bytes;
@@ -132,6 +143,19 @@ static __always_inline void read_cgroup(struct task_struct *task, struct task_in
 	info->cgroup_id = kn->id;
 }
 
+/* Each counter group exists only with its kernel config option. */
+static __always_inline void add_io(struct io_counters *io, struct task_io_accounting *ioac)
+{
+	if (bpf_core_field_exists(ioac->read_bytes)) {
+		io->read_bytes += ioac->read_bytes;
+		io->write_bytes += ioac->write_bytes;
+	}
+	if (bpf_core_field_exists(ioac->syscr)) {
+		io->syscr += ioac->syscr;
+		io->syscw += ioac->syscw;
+	}
+}
+
 SEC("iter/task")
 int dump_task(struct bpf_iter__task *ctx)
 {
@@ -153,6 +177,7 @@ int dump_task(struct bpf_iter__task *ctx)
 			.state = task->__state | (u32)task->exit_state,
 		};
 		bpf_probe_read_kernel(&tr.comm, sizeof(tr.comm), &task->comm);
+		add_io(&tr.io, &task->ioac);
 		bpf_seq_write(ctx->meta->seq, &tr, sizeof(tr));
 		return 0;
 	}
@@ -162,6 +187,7 @@ int dump_task(struct bpf_iter__task *ctx)
 	if (sig) {
 		info.nr_threads = sig->nr_threads;
 		dead_runtime = sig->sum_sched_runtime;
+		add_io(&info.io, &sig->ioac);
 	}
 
 	struct task_struct *parent = task->real_parent;
@@ -180,6 +206,7 @@ int dump_task(struct bpf_iter__task *ctx)
 	 * the leader's own plus that of already-exited threads, which the
 	 * kernel folds into signal_struct. Live threads arrive as thread_rec. */
 	info.cpu_ns = task->se.sum_exec_runtime + dead_runtime;
+	add_io(&info.io, &task->ioac);
 	info.prio = task->prio;
 	info.static_prio = task->static_prio;
 

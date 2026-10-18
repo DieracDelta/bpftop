@@ -89,6 +89,7 @@ pub struct App {
 
     // Column toggles
     pub show_net: bool,
+    pub show_io: bool,
     pub show_gpu: bool,
 
     // Service display mode
@@ -186,6 +187,7 @@ impl App {
             show_kernel_threads,
             collapsed_pids: HashSet::new(),
             show_net: false,
+            show_io: false,
             show_gpu: true,
             service_display_mode: ServiceDisplayMode::ServiceOnly,
             service_cache: HashMap::new(),
@@ -367,6 +369,7 @@ impl App {
             service_display_mode: self.service_display_mode,
             show_gpu: self.show_gpu && has_gpu,
             show_net: self.show_net,
+            show_io: self.show_io,
             visual_range: self.visual_range(),
             error_message: self.ebpf_error.as_deref(),
         };

@@ -66,10 +66,21 @@ struct css_set {
 	struct cgroup *dfl_cgrp;
 };
 
+/* Per-task I/O counters (/proc/<pid>/io). syscr/syscw need
+ * CONFIG_TASK_XACCT, read_bytes/write_bytes CONFIG_TASK_IO_ACCOUNTING;
+ * readers guard each with bpf_core_field_exists. */
+struct task_io_accounting {
+	u64 syscr;
+	u64 syscw;
+	u64 read_bytes;
+	u64 write_bytes;
+};
+
 struct signal_struct {
 	atomic_t live;
 	int nr_threads;
 	unsigned long long sum_sched_runtime;
+	struct task_io_accounting ioac;
 };
 
 struct sched_entity {
@@ -92,6 +103,7 @@ struct task_struct {
 	char comm[16];
 	struct css_set *cgroups;
 	struct signal_struct *signal;
+	struct task_io_accounting ioac;
 };
 
 struct net_device {

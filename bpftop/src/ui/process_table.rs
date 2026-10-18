@@ -6,7 +6,7 @@ use ratatui::widgets::Widget;
 use unicode_width::UnicodeWidthChar;
 
 use crate::data::container::ServiceDisplayMode;
-use crate::data::process::{format_bytes, format_rate, format_time, ProcessInfo, ProcessState, SortColumn};
+use crate::data::process::{format_bytes, format_ops, format_rate, format_time, ProcessInfo, ProcessState, SortColumn};
 use crate::theme::Theme;
 
 /// Truncate a string to at most `max_cols` display columns (Unicode-aware).
@@ -35,6 +35,7 @@ pub struct ProcessTableWidget<'a> {
     pub service_display_mode: ServiceDisplayMode,
     pub show_gpu: bool,
     pub show_net: bool,
+    pub show_io: bool,
     pub visual_range: Option<(usize, usize)>,
     pub error_message: Option<&'a str>,
 }
@@ -249,6 +250,18 @@ impl<'a> ProcessTableWidget<'a> {
                     }
                 }
             }
+            SortColumn::IoRead | SortColumn::IoWrite | SortColumn::Iops => {
+                let (rate, text): (f64, fn(f64) -> String) = match col {
+                    SortColumn::IoRead => (proc.io_read_rate, format_rate),
+                    SortColumn::IoWrite => (proc.io_write_rate, format_rate),
+                    _ => (proc.iops, format_ops),
+                };
+                if rate < 0.5 {
+                    format!("{:>w$}", "-")
+                } else {
+                    format!("{:>w$}", text(rate))
+                }
+            }
             SortColumn::Time => {
                 let t = format_time(proc.cpu_time_secs);
                 format!("{:>w$}", t)
@@ -293,6 +306,7 @@ impl<'a> ProcessTableWidget<'a> {
             self.service_display_mode,
             self.show_gpu,
             self.show_net,
+            self.show_io,
         )
     }
 }
@@ -308,6 +322,7 @@ pub fn column_layout(
     service_display_mode: ServiceDisplayMode,
     show_gpu: bool,
     show_net: bool,
+    show_io: bool,
 ) -> Vec<(SortColumn, u16)> {
     let mut cols: Vec<(SortColumn, u16)> = SortColumn::all()
         .iter()
@@ -315,6 +330,7 @@ pub fn column_layout(
         .filter(|c| **c != SortColumn::Service || show_service)
         .filter(|c| (**c != SortColumn::GpuPercent && **c != SortColumn::GpuMem) || show_gpu)
         .filter(|c| !matches!(**c, SortColumn::NetRate | SortColumn::NetTotal | SortColumn::NetIf) || show_net)
+        .filter(|c| !matches!(**c, SortColumn::IoRead | SortColumn::IoWrite | SortColumn::Iops) || show_io)
         .map(|c| (*c, c.width()))
         .collect();
 

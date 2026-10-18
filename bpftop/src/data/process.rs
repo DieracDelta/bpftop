@@ -27,6 +27,10 @@ pub struct ProcessInfo {
     pub net_tx_bytes: u64,
     pub net_rate: f64,
     pub net_ifname: Text,
+    /// Bytes/s read from / written to storage, and read+write syscalls/s.
+    pub io_read_rate: f64,
+    pub io_write_rate: f64,
+    pub iops: f64,
     pub cpu_time_secs: f64,
     #[allow(dead_code)]
     pub start_time_ns: u64,
@@ -148,6 +152,9 @@ impl ProcessInfo {
         self.net_tx_bytes = src.net_tx_bytes;
         self.net_rate = src.net_rate;
         self.net_ifname = src.net_ifname.clone();
+        self.io_read_rate = src.io_read_rate;
+        self.io_write_rate = src.io_write_rate;
+        self.iops = src.iops;
         self.user = src.user.clone();
         self.container = src.container.clone();
         self.cgroup_path = src.cgroup_path.clone();
@@ -219,6 +226,9 @@ pub enum SortColumn {
     NetRate,
     NetTotal,
     NetIf,
+    IoRead,
+    IoWrite,
+    Iops,
     Time,
     Container,
     Service,
@@ -243,6 +253,9 @@ impl SortColumn {
             Self::NetRate,
             Self::NetTotal,
             Self::NetIf,
+            Self::IoRead,
+            Self::IoWrite,
+            Self::Iops,
             Self::Time,
             Self::Container,
             Self::Service,
@@ -267,6 +280,9 @@ impl SortColumn {
             Self::NetRate => "NET/s",
             Self::NetTotal => "NET TOT",
             Self::NetIf => "IF",
+            Self::IoRead => "RD/s",
+            Self::IoWrite => "WR/s",
+            Self::Iops => "IOPS",
             Self::Time => "TIME+",
             Self::Container => "CONT",
             Self::Service => "UNIT",
@@ -292,6 +308,9 @@ impl SortColumn {
             Self::NetRate => 8,
             Self::NetTotal => 7,
             Self::NetIf => 6,
+            Self::IoRead => 8,
+            Self::IoWrite => 8,
+            Self::Iops => 6,
             Self::Time => 10,
             Self::Container => 12,
             Self::Service => 16,
@@ -332,6 +351,9 @@ pub fn compare_processes(a: &ProcessInfo, b: &ProcessInfo, col: SortColumn, asce
         SortColumn::NetRate => quantize(a.net_rate).cmp(&quantize(b.net_rate)).then(a.pid.cmp(&b.pid)),
         SortColumn::NetTotal => (a.net_tx_bytes + a.net_rx_bytes).cmp(&(b.net_tx_bytes + b.net_rx_bytes)).then(a.pid.cmp(&b.pid)),
         SortColumn::NetIf => a.net_ifname.cmp(&b.net_ifname).then(a.pid.cmp(&b.pid)),
+        SortColumn::IoRead => quantize(a.io_read_rate).cmp(&quantize(b.io_read_rate)).then(a.pid.cmp(&b.pid)),
+        SortColumn::IoWrite => quantize(a.io_write_rate).cmp(&quantize(b.io_write_rate)).then(a.pid.cmp(&b.pid)),
+        SortColumn::Iops => quantize(a.iops).cmp(&quantize(b.iops)).then(a.pid.cmp(&b.pid)),
         SortColumn::Time => quantize(a.cpu_time_secs).cmp(&quantize(b.cpu_time_secs)).then(a.pid.cmp(&b.pid)),
         SortColumn::Container => a.container.cmp(&b.container).then(a.pid.cmp(&b.pid)),
         SortColumn::Service => a.service.cmp(&b.service).then(a.pid.cmp(&b.pid)),
@@ -392,6 +414,17 @@ pub fn format_rate(bytes_per_sec: f64) -> String {
     }
 }
 
+/// Format an operations-per-second rate compactly (e.g. 12, 3.4K, 1.2M).
+pub fn format_ops(ops_per_sec: f64) -> String {
+    if ops_per_sec >= 1_000_000.0 {
+        format!("{:.1}M", ops_per_sec / 1_000_000.0)
+    } else if ops_per_sec >= 1_000.0 {
+        format!("{:.1}K", ops_per_sec / 1_000.0)
+    } else {
+        format!("{:.0}", ops_per_sec)
+    }
+}
+
 /// Format CPU time as HH:MM:SS.cc.
 pub fn format_time(secs: f64) -> String {
     let total_centisecs = (secs * 100.0) as u64;
@@ -430,6 +463,9 @@ mod tests {
             net_tx_bytes: 0,
             net_rate: 0.0,
             net_ifname: Text::from(""),
+            io_read_rate: 0.0,
+            io_write_rate: 0.0,
+            iops: 0.0,
             cpu_time_secs: 0.0,
             start_time_ns: 0,
             comm: Text::from("test"),

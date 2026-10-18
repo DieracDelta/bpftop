@@ -11,6 +11,7 @@ use super::gpu::GpuCollector;
 use super::process::{display_text, ProcessInfo, ProcessState, Text};
 use super::system::*;
 use crate::ebpf::loader::{self, EbpfLoader};
+use bpftop_common::IoCounters;
 
 /// Wall time spent in each phase of the most recent `collect()`.
 #[derive(Debug, Clone, Copy, Default)]
@@ -52,6 +53,8 @@ pub struct Collector {
     prev_cpus: Vec<CpuStats>,
     prev_proc_times: HashMap<u32, u64>,
     prev_net_bytes: HashMap<u32, u64>,
+    /// pid (tid for thread rows) → I/O counters at the previous refresh
+    prev_io: HashMap<u32, IoCounters>,
     prev_net_time: Instant,
     ifindex_cache: HashMap<u32, Text>,
     page_size: u64,
@@ -103,6 +106,7 @@ impl Collector {
             prev_cpus,
             prev_proc_times: HashMap::new(),
             prev_net_bytes: HashMap::new(),
+            prev_io: HashMap::new(),
             prev_net_time: Instant::now(),
             ifindex_cache: HashMap::new(),
             page_size,
@@ -129,6 +133,7 @@ impl Collector {
             prev_cpus: Vec::new(),
             prev_proc_times: HashMap::new(),
             prev_net_bytes: HashMap::new(),
+            prev_io: HashMap::new(),
             prev_net_time: Instant::now(),
             ifindex_cache: HashMap::new(),
             page_size: 4096,
@@ -186,9 +191,9 @@ impl Collector {
             }
         };
         let bpf_tasks = &records.tasks;
-        // Network counters were sampled during the iterator walk.
+        // Network and I/O counters were sampled during the iterator walk.
         let net_now = Instant::now();
-        let net_wall_delta_secs = net_now
+        let wall_delta_secs = net_now
             .duration_since(self.prev_net_time)
             .as_secs_f64()
             .max(0.1);
@@ -205,6 +210,7 @@ impl Collector {
         }
         let mut cmdline_cache = HashMap::with_capacity(self.cmdline_cache.len());
         let mut new_net_bytes = HashMap::new();
+        let mut new_io = HashMap::with_capacity(self.prev_io.len());
 
         // Classify tasks: processes, user threads, kernel threads. The
         // iterator emits only thread-group leaders, with their thread count.
@@ -310,11 +316,19 @@ impl Collector {
             let container = self.cgroup_resolver.resolve(task.cgroup_id);
 
             // Network: cumulative bytes from NET_STATS, joined in by the iterator
+            // Disk I/O: leader + exited threads (task.io) + live threads
+            let mut io = task.io;
+            if let Some(threads) = records.thread_io.get(&task.pid) {
+                io += *threads;
+            }
+            let io_rates = IoRates::between(self.prev_io.get(&task.pid), &io, wall_delta_secs);
+            new_io.insert(task.pid, io);
+
             let (mut net_rate, mut net_ifname) = (0.0, self.no_ifname.clone());
             let net_total = task.net_tx_bytes + task.net_rx_bytes;
             if net_total > 0 || task.net_ifindex > 0 {
                 let prev_total = self.prev_net_bytes.get(&task.pid).copied().unwrap_or(net_total);
-                net_rate = net_total.saturating_sub(prev_total) as f64 / net_wall_delta_secs;
+                net_rate = net_total.saturating_sub(prev_total) as f64 / wall_delta_secs;
                 new_net_bytes.insert(task.pid, net_total);
 
                 net_ifname = if task.net_ifindex > 0 {
@@ -351,6 +365,9 @@ impl Collector {
                 net_tx_bytes: task.net_tx_bytes,
                 net_rate,
                 net_ifname,
+                io_read_rate: io_rates.read,
+                io_write_rate: io_rates.write,
+                iops: io_rates.ops,
                 cpu_time_secs,
                 start_time_ns: task.start_time_ns,
                 comm,
@@ -396,6 +413,11 @@ impl Collector {
                 row.net_tx_bytes = 0;
                 row.net_rate = 0.0;
                 row.net_ifname = self.no_ifname.clone();
+                let io_rates = IoRates::between(self.prev_io.get(&t.tid), &t.io, wall_delta_secs);
+                row.io_read_rate = io_rates.read;
+                row.io_write_rate = io_rates.write;
+                row.iops = io_rates.ops;
+                new_io.insert(t.tid, t.io);
                 thread_rows.push(row);
             }
             processes.extend(thread_rows);
@@ -447,6 +469,7 @@ impl Collector {
             .map(|p| (p.pid, p.prev_cpu_ns))
             .collect();
         self.prev_net_bytes = new_net_bytes;
+        self.prev_io = new_io;
         self.prev_net_time = net_now;
         lap(&mut timings.tree);
         self.last_timings = timings;
@@ -469,6 +492,28 @@ impl Collector {
         Ok((sys_info, processes))
     }
 
+}
+
+/// Per-second I/O rates between two samples of one task's counters.
+struct IoRates {
+    read: f64,
+    write: f64,
+    ops: f64,
+}
+
+impl IoRates {
+    /// First sample for a task (no `prev`) reports zero rates.
+    fn between(prev: Option<&IoCounters>, cur: &IoCounters, secs: f64) -> Self {
+        let Some(prev) = prev else {
+            return Self { read: 0.0, write: 0.0, ops: 0.0 };
+        };
+        let rate = |now: u64, before: u64| now.saturating_sub(before) as f64 / secs;
+        Self {
+            read: rate(cur.read_bytes, prev.read_bytes),
+            write: rate(cur.write_bytes, prev.write_bytes),
+            ops: rate(cur.syscr + cur.syscw, prev.syscr + prev.syscw),
+        }
+    }
 }
 
 /// Convert a null-terminated comm byte array to a String.

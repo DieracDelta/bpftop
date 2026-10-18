@@ -269,6 +269,20 @@ fn handle_normal_key(app: &mut App, key: KeyEvent) -> bool {
             }
             app.update_filtered_processes();
         }
+        // Disk I/O columns: show sorted by RD/s, then WR/s, then IOPS, then hide.
+        KeyCode::Char('D') => {
+            let (show, next) = match (app.show_io, app.sort_column) {
+                (false, _) => (true, SortColumn::IoRead),
+                (true, SortColumn::IoRead) => (true, SortColumn::IoWrite),
+                (true, SortColumn::IoWrite) => (true, SortColumn::Iops),
+                (true, SortColumn::Iops) => (false, SortColumn::CpuPercent),
+                (true, _) => (true, SortColumn::IoRead),
+            };
+            app.show_io = show;
+            app.sort_column = next;
+            app.sort_ascending = false;
+            app.update_filtered_processes();
+        }
         KeyCode::Char('W') => {
             app.sort_column = SortColumn::GpuMem;
             app.sort_ascending = false;
@@ -551,6 +565,7 @@ fn handle_mouse(app: &mut App, mouse: MouseEvent) {
                     app.service_display_mode,
                     has_gpu,
                     app.show_net,
+                    app.show_io,
                 );
 
                 let mut x: u16 = 0;

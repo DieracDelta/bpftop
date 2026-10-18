@@ -1,3 +1,24 @@
+/// `/proc/<pid>/io`-style counters: bytes read from / written to storage
+/// and read/write syscall counts. Zero where the kernel lacks
+/// CONFIG_TASK_IO_ACCOUNTING / CONFIG_TASK_XACCT.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct IoCounters {
+    pub read_bytes: u64,
+    pub write_bytes: u64,
+    pub syscr: u64,
+    pub syscw: u64,
+}
+
+impl std::ops::AddAssign for IoCounters {
+    fn add_assign(&mut self, o: Self) {
+        self.read_bytes += o.read_bytes;
+        self.write_bytes += o.write_bytes;
+        self.syscr += o.syscr;
+        self.syscw += o.syscw;
+    }
+}
+
 /// Process/task information collected by the eBPF task iterator.
 /// This struct is written by the eBPF program and read by userspace.
 #[repr(C)]
@@ -42,6 +63,8 @@ pub struct TaskInfo {
     pub net_ifindex: u32,
     /// Live threads in the thread group (the iterator emits leaders only).
     pub nr_threads: u32,
+    /// I/O of the leader plus exited threads (live threads: `ThreadRec`).
+    pub io: IoCounters,
     /// Value of the task's cgroup `cgroup.freeze` (0 or 1).
     pub frozen: u8,
     /// 1 if the task has PF_KTHREAD set.
@@ -65,6 +88,7 @@ pub struct ThreadRec {
     pub _pad: u32,
     /// Thread name, null-terminated
     pub comm: [u8; 16],
+    pub io: IoCounters,
 }
 
 /// Command line event captured by sched_process_exec tracepoint.
@@ -93,9 +117,9 @@ pub struct NetStats {
 }
 
 // Keep in sync with bpftop-ebpf-c/bpftop.bpf.c (asserted on both sides).
-const _: () = assert!(core::mem::size_of::<TaskInfo>() == 136);
+const _: () = assert!(core::mem::size_of::<TaskInfo>() == 168);
 const _: () = assert!(core::mem::size_of::<CmdlineEvent>() == 280);
-const _: () = assert!(core::mem::size_of::<ThreadRec>() == 40);
+const _: () = assert!(core::mem::size_of::<ThreadRec>() == 72);
 
 /// Parsed output of one task iterator walk.
 #[derive(Debug, Default)]
@@ -106,6 +130,8 @@ pub struct IterRecords {
     pub threads: Vec<ThreadRec>,
     /// tgid → summed CPU ns of the group's live non-leader threads.
     pub thread_cpu_ns: std::collections::HashMap<u32, u64>,
+    /// tgid → summed I/O of the group's live non-leader threads.
+    pub thread_io: std::collections::HashMap<u32, IoCounters>,
     pub thread_records: usize,
 }
 
@@ -137,6 +163,7 @@ pub fn parse_iter_records(buf: &[u8]) -> Result<IterRecords, usize> {
             // SAFETY: length checked; ThreadRec is plain old data.
             let t = unsafe { core::ptr::read_unaligned(rest.as_ptr() as *const ThreadRec) };
             *out.thread_cpu_ns.entry(t.pid).or_default() += t.cpu_ns;
+            *out.thread_io.entry(t.pid).or_default() += t.io;
             out.thread_records += 1;
             out.threads.push(t);
             off += size_of::<ThreadRec>();
@@ -170,7 +197,7 @@ mod tests {
     }
 
     fn thread(pid: u32, tid: u32, cpu_ns: u64) -> ThreadRec {
-        ThreadRec { pid, tid, cpu_ns, state: 0, _pad: 0, comm: [0; 16] }
+        ThreadRec { pid, tid, cpu_ns, state: 0, _pad: 0, comm: [0; 16], io: IoCounters::default() }
     }
 
     #[test]
@@ -197,6 +224,6 @@ mod tests {
 
         let mut buf = bytes(&thread(1, 2, 3));
         buf.extend_from_slice(&[0; 4]);
-        assert_eq!(parse_iter_records(&buf).unwrap_err(), 40);
+        assert_eq!(parse_iter_records(&buf).unwrap_err(), 72);
     }
 }
