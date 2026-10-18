@@ -6,7 +6,7 @@ use anyhow::Result;
 use super::container::CgroupResolver;
 #[cfg(feature = "gpu")]
 use super::gpu::GpuCollector;
-use super::process::{display_text, ProcessInfo, ProcessState};
+use super::process::{display_text, ProcessInfo, ProcessState, Text};
 use super::system::*;
 use crate::ebpf::loader::{self, EbpfLoader};
 
@@ -39,16 +39,19 @@ pub struct Collector {
     system: Option<SystemReader>,
     cgroup_resolver: CgroupResolver,
     /// pid → (CMDLINE_MAP generation, cmdline)
-    cmdline_cache: HashMap<u32, (u64, String)>,
+    cmdline_cache: HashMap<u32, (u64, Text)>,
     /// uid → username (or the uid as a string if it has no passwd entry)
-    username_cache: HashMap<u32, String>,
+    username_cache: HashMap<u32, Text>,
+    /// net_ifname values shared by most processes.
+    no_ifname: Text,
+    any_ifname: Text,
     username_cache_time: Instant,
     prev_cpu_total: CpuStats,
     prev_cpus: Vec<CpuStats>,
     prev_proc_times: HashMap<u32, u64>,
     prev_net_bytes: HashMap<u32, u64>,
     prev_net_time: Instant,
-    ifindex_cache: HashMap<u32, String>,
+    ifindex_cache: HashMap<u32, Text>,
     page_size: u64,
     #[cfg(feature = "gpu")]
     gpu_collector: Option<GpuCollector>,
@@ -62,7 +65,9 @@ impl Collector {
 
         // One-shot /proc/*/cmdline scan to seed the BPF map for
         // processes already running before tracepoints were attached.
-        loader::seed_cmdlines_from_proc(&mut ebpf);
+        if ebpf.is_loaded() {
+            loader::seed_cmdlines_from_proc(&mut ebpf);
+        }
 
         let mut system = SystemReader::new()
             .inspect_err(|e| log::error!("system stats unavailable: {e:#}"))
@@ -83,6 +88,8 @@ impl Collector {
             cmdline_cache: HashMap::new(),
             username_cache: HashMap::new(),
             username_cache_time: Instant::now(),
+            no_ifname: Text::from(""),
+            any_ifname: Text::from("*"),
             prev_cpu_total,
             prev_cpus,
             prev_proc_times: HashMap::new(),
@@ -102,10 +109,12 @@ impl Collector {
         Self {
             ebpf: EbpfLoader::noop(),
             system: None,
-            cgroup_resolver: CgroupResolver::new(),
+            cgroup_resolver: CgroupResolver::empty(),
             cmdline_cache: HashMap::new(),
             username_cache: HashMap::new(),
             username_cache_time: Instant::now(),
+            no_ifname: Text::from(""),
+            any_ifname: Text::from("*"),
             prev_cpu_total: CpuStats::default(),
             prev_cpus: Vec::new(),
             prev_proc_times: HashMap::new(),
@@ -260,21 +269,24 @@ impl Collector {
             let user = self
                 .username_cache
                 .entry(task.ruid)
-                .or_insert_with(|| resolve_username(task.ruid))
+                .or_insert_with(|| Text::from(resolve_username(task.ruid)))
                 .clone();
 
             let is_kernel_thread = task.ppid == 2 || task.pid == 2;
 
             // cmdline: prefer BPF CMDLINE_MAP, fall back to comm. Only hit
             // the map when the entry's generation differs from the cached one.
-            let comm = comm_to_string(&task.comm);
+            let comm = Text::from(comm_to_string(&task.comm));
             let cached = self
                 .cmdline_cache
                 .remove(&task.pid)
                 .filter(|(gen, _)| *gen == task.cmdline_gen);
             let fetched = match cached {
                 Some(entry) => Some(entry),
-                None if task.cmdline_gen != 0 => self.ebpf.get_cmdline(task.pid),
+                None if task.cmdline_gen != 0 => self
+                    .ebpf
+                    .get_cmdline(task.pid)
+                    .map(|(gen, s)| (gen, Text::from(s))),
                 None => None,
             };
             let cmdline = match fetched {
@@ -282,7 +294,7 @@ impl Collector {
                     cmdline_cache.insert(task.pid, (gen, cmdline.clone()));
                     cmdline
                 }
-                None => format!("[{}]", comm),
+                None => Text::from(format!("[{}]", comm)),
             };
 
             // Container: resolve from cgroup_id
@@ -290,7 +302,7 @@ impl Collector {
             let container = self.cgroup_resolver.resolve(task.cgroup_id);
 
             // Network: cumulative bytes from NET_STATS, joined in by the iterator
-            let (mut net_rate, mut net_ifname) = (0.0, String::new());
+            let (mut net_rate, mut net_ifname) = (0.0, self.no_ifname.clone());
             let net_total = task.net_tx_bytes + task.net_rx_bytes;
             if net_total > 0 || task.net_ifindex > 0 {
                 let prev_total = self.prev_net_bytes.get(&task.pid).copied().unwrap_or(net_total);
@@ -303,12 +315,12 @@ impl Collector {
                         .entry(ifindex)
                         .or_insert_with(|| {
                             nix::net::if_::if_indextoname(ifindex)
-                                .map(|s| s.to_string_lossy().into_owned())
-                                .unwrap_or_else(|_| format!("if{ifindex}"))
+                                .map(|s| Text::from(s.to_string_lossy()))
+                                .unwrap_or_else(|_| Text::from(format!("if{ifindex}")))
                         })
                         .clone()
                 } else {
-                    "*".to_string()
+                    self.any_ifname.clone()
                 };
             }
 
@@ -335,7 +347,7 @@ impl Collector {
                 start_time_ns: task.start_time_ns,
                 comm,
                 cmdline,
-                container: container.map(|c| c.name),
+                container,
                 service: None,
                 cgroup_path,
                 children: Vec::new(),

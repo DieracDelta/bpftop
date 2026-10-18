@@ -1,10 +1,10 @@
 use std::collections::{HashMap, HashSet};
 use std::io;
-use std::sync::mpsc;
+use std::sync::mpsc::{self, RecvTimeoutError};
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
-use crossterm::event::{self, DisableMouseCapture, EnableMouseCapture};
+use crossterm::event::{self, DisableMouseCapture, EnableMouseCapture, Event};
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
@@ -16,7 +16,7 @@ use crate::data::cgroup_control;
 use crate::data::collector::Collector;
 use crate::data::container::{resolve_service_from_path, ServiceDisplayMode};
 use crate::data::process::{
-    compare_processes, matches_filter, ProcessInfo, SortColumn, YankField,
+    compare_processes, matches_filter, ProcessInfo, SortColumn, Text, YankField,
 };
 use crate::data::system::SystemInfo;
 use crate::ebpf::loader::EbpfLoader;
@@ -41,6 +41,16 @@ pub enum AppMode {
     SortSelect,
     Visual,
     Freeze,
+}
+
+/// How long a flash message stays in the status bar.
+const FLASH_DURATION: Duration = Duration::from_secs(2);
+
+/// Everything the main loop wakes up for.
+enum Msg {
+    Data(Box<(SystemInfo, Vec<ProcessInfo>)>),
+    Input(Event),
+    InputError(io::Error),
 }
 
 /// A cgroup targeted for freeze/thaw, with the PIDs it contains.
@@ -83,6 +93,8 @@ pub struct App {
 
     // Service display mode
     pub service_display_mode: ServiceDisplayMode,
+    /// cgroup path → service name for `service_display_mode`.
+    service_cache: HashMap<Text, Option<Text>>,
 
     // Filter/search
     pub filter_query: String,
@@ -172,6 +184,7 @@ impl App {
             show_net: false,
             show_gpu: true,
             service_display_mode: ServiceDisplayMode::ServiceOnly,
+            service_cache: HashMap::new(),
             filter_query: String::new(),
             active_filter: String::new(),
             user_filter: None,
@@ -207,9 +220,10 @@ impl App {
 
         let tick_rate = Duration::from_millis(self.config.general.refresh_rate_ms);
 
-        // Move collector to background thread
-        let (data_tx, data_rx) = mpsc::channel();
-        let (shutdown_tx, shutdown_rx) = mpsc::channel::<()>();
+        // The main loop blocks on one channel fed by the collector and
+        // input threads, so it only wakes for new data, input, or a flash
+        // message expiring (no polling).
+        let (tx, rx) = mpsc::channel();
         let mut collector = std::mem::replace(&mut self.collector, Collector::noop());
 
         // Initial collect on main thread so first frame has data
@@ -217,56 +231,37 @@ impl App {
             self.merge_data(data.0, data.1);
         }
 
-        let tick_rate_clone = tick_rate;
+        let data_tx = tx.clone();
         std::thread::spawn(move || {
+            // Fixed cadence: the interval includes collection time.
+            let mut next = Instant::now() + tick_rate;
             loop {
-                std::thread::sleep(tick_rate_clone);
+                std::thread::sleep(next.saturating_duration_since(Instant::now()));
+                next = (next + tick_rate).max(Instant::now());
                 match collector.collect() {
-                    Ok(data) => {
-                        if data_tx.send(data).is_err() {
+                    Ok((sys_info, processes)) => {
+                        if data_tx.send(Msg::Data(Box::new((sys_info, processes)))).is_err() {
                             break;
                         }
                     }
                     Err(e) => log::error!("Collection error: {e}"),
                 }
-                if shutdown_rx.try_recv().is_ok() {
-                    break;
-                }
             }
         });
 
-        // Short poll timeout so UI stays responsive
-        let poll_timeout = Duration::from_millis(50);
-
-        loop {
-            // Drain any available data (use freshest)
-            while let Ok((sys_info, processes)) = data_rx.try_recv() {
-                self.merge_data(sys_info, processes);
+        let input_tx = tx;
+        std::thread::spawn(move || loop {
+            let msg = match event::read() {
+                Ok(ev) => Msg::Input(ev),
+                Err(e) => Msg::InputError(e),
+            };
+            let failed = matches!(msg, Msg::InputError(_));
+            if input_tx.send(msg).is_err() || failed {
+                break;
             }
+        });
 
-            // Expire flash message (forces redraw to clear it)
-            if self.active_flash().is_some() {
-                self.dirty = true;
-            }
-
-            // Only redraw when something changed
-            if self.dirty {
-                terminal.draw(|frame| self.draw(frame))?;
-                self.dirty = false;
-            }
-
-            // Handle events with short timeout
-            if event::poll(poll_timeout)? {
-                let evt = event::read()?;
-                if input::handle_event(self, evt) {
-                    break;
-                }
-                self.dirty = true;
-            }
-        }
-
-        // Signal the background thread to exit
-        drop(shutdown_tx);
+        let result = self.event_loop(&mut terminal, &rx);
 
         // Restore terminal
         disable_raw_mode()?;
@@ -277,7 +272,53 @@ impl App {
         )?;
         terminal.show_cursor()?;
 
-        Ok(())
+        result
+    }
+
+    fn event_loop(
+        &mut self,
+        terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+        rx: &mpsc::Receiver<Msg>,
+    ) -> Result<()> {
+        loop {
+            // Only redraw when something changed
+            if self.dirty {
+                terminal.draw(|frame| self.draw(frame))?;
+                self.dirty = false;
+            }
+
+            // Sleep until a message arrives or the flash message expires.
+            let first = match self.flash_deadline() {
+                Some(deadline) => rx.recv_timeout(deadline.saturating_duration_since(Instant::now())),
+                None => rx.recv().map_err(|_| RecvTimeoutError::Disconnected),
+            };
+            let first = match first {
+                Ok(msg) => msg,
+                Err(RecvTimeoutError::Timeout) => {
+                    self.dirty = true; // clear the expired flash
+                    continue;
+                }
+                Err(RecvTimeoutError::Disconnected) => return Ok(()),
+            };
+
+            // Handle everything already queued (mouse motion, key repeat,
+            // a refresh) before drawing once.
+            for msg in std::iter::once(first).chain(rx.try_iter()) {
+                match msg {
+                    Msg::Data(data) => {
+                        let (sys_info, processes) = *data;
+                        self.merge_data(sys_info, processes);
+                    }
+                    Msg::Input(evt) => {
+                        if input::handle_event(self, evt) {
+                            return Ok(());
+                        }
+                        self.dirty = true;
+                    }
+                    Msg::InputError(e) => return Err(e.into()),
+                }
+            }
+        }
     }
 
     fn draw(&mut self, frame: &mut ratatui::Frame) {
@@ -390,11 +431,10 @@ impl App {
     /// Resolve service names on all processes based on current display mode.
     pub fn resolve_services(&mut self) {
         let mode = self.service_display_mode;
-        for p in &mut self.all_processes {
-            p.service = resolve_service_from_path(&p.cgroup_path, mode);
-        }
-        for p in &mut self.filtered_processes {
-            p.service = resolve_service_from_path(&p.cgroup_path, mode);
+        let cache = &mut self.service_cache;
+        cache.clear();
+        for p in self.all_processes.iter_mut().chain(&mut self.filtered_processes) {
+            p.service = service_for(cache, mode, &p.cgroup_path);
         }
     }
 
@@ -419,26 +459,25 @@ impl App {
 
             self.all_processes = new_map.into_values().collect();
             let mode = self.service_display_mode;
+            let cache = &mut self.service_cache;
+            if cache.len() > SERVICE_CACHE_MAX {
+                cache.clear();
+            }
             for p in &mut self.all_processes {
                 if tagged_pids.contains(&p.pid) {
                     p.tagged = true;
                 }
-                p.service = resolve_service_from_path(&p.cgroup_path, mode);
+                p.service = service_for(cache, mode, &p.cgroup_path);
             }
             self.update_filtered_processes();
         } else {
             // Same PIDs — update values in-place, no re-sort, no tree rebuild
             let mode = self.service_display_mode;
-            for p in &mut self.all_processes {
+            let cache = &mut self.service_cache;
+            for p in self.all_processes.iter_mut().chain(&mut self.filtered_processes) {
                 if let Some(np) = new_map.get(&p.pid) {
                     p.update_dynamic_fields(np);
-                    p.service = resolve_service_from_path(&np.cgroup_path, mode);
-                }
-            }
-            for p in &mut self.filtered_processes {
-                if let Some(np) = new_map.get(&p.pid) {
-                    p.update_dynamic_fields(np);
-                    p.service = resolve_service_from_path(&np.cgroup_path, mode);
+                    p.service = service_for(cache, mode, &p.cgroup_path);
                 }
             }
         }
@@ -446,6 +485,7 @@ impl App {
     }
 
     pub fn update_filtered_processes(&mut self) {
+        let filter_lower = self.active_filter.to_lowercase();
         let mut procs: Vec<ProcessInfo> = self
             .all_processes
             .iter()
@@ -460,12 +500,12 @@ impl App {
                 }
                 // User filter
                 if let Some(ref user) = self.user_filter {
-                    if p.user != *user {
+                    if *p.user != **user {
                         return false;
                     }
                 }
                 // Text filter
-                matches_filter(p, &self.active_filter)
+                matches_filter(p, &self.active_filter, &filter_lower)
             })
             .cloned()
             .collect();
@@ -738,11 +778,18 @@ impl App {
 
     pub fn active_flash(&self) -> Option<&str> {
         if let Some((ref msg, when)) = self.flash_message {
-            if when.elapsed() < Duration::from_secs(2) {
+            if when.elapsed() < FLASH_DURATION {
                 return Some(msg.as_str());
             }
         }
         None
+    }
+
+    /// When the visible flash message should disappear, if one is visible.
+    fn flash_deadline(&self) -> Option<Instant> {
+        let (_, when) = self.flash_message.as_ref()?;
+        let deadline = *when + FLASH_DURATION;
+        (deadline > Instant::now()).then_some(deadline)
     }
 
     // --- Yank to clipboard ---
@@ -844,7 +891,7 @@ impl App {
         if self.user_filter.is_some() {
             self.user_filter = None;
         } else if let Some(proc) = self.filtered_processes.get(self.selected) {
-            self.user_filter = Some(proc.user.clone());
+            self.user_filter = Some(proc.user.to_string());
         }
         self.update_filtered_processes();
     }
@@ -989,10 +1036,10 @@ impl App {
             self.filtered_processes
                 .iter()
                 .filter(|p| p.tagged)
-                .map(|p| (p.pid, p.cgroup_path.clone()))
+                .map(|p| (p.pid, p.cgroup_path.to_string()))
                 .collect()
         } else if let Some(proc) = self.filtered_processes.get(self.selected) {
-            vec![(proc.pid, proc.cgroup_path.clone())]
+            vec![(proc.pid, proc.cgroup_path.to_string())]
         } else {
             vec![]
         }
@@ -1038,6 +1085,17 @@ impl App {
             self.scroll_offset = self.selected - self.visible_rows + 1;
         }
     }
+}
+
+/// Bound on distinct cgroup paths remembered by `service_for`.
+const SERVICE_CACHE_MAX: usize = 4096;
+
+/// Service name for a cgroup path in `mode`, resolved once per path.
+fn service_for(cache: &mut HashMap<Text, Option<Text>>, mode: ServiceDisplayMode, path: &Text) -> Option<Text> {
+    cache
+        .entry(path.clone())
+        .or_insert_with(|| resolve_service_from_path(path, mode).map(Text::from))
+        .clone()
 }
 
 fn is_root_cgroup(path: &str) -> bool {

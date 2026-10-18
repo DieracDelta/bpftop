@@ -1,4 +1,9 @@
 use std::cmp::Ordering;
+use std::sync::Arc;
+
+/// Immutable shared string. Process snapshots are cloned into the UI's
+/// lists every refresh, so text fields are refcounted instead of copied.
+pub type Text = Arc<str>;
 
 /// Full process information combining eBPF data and /proc supplements.
 #[derive(Debug, Clone)]
@@ -7,7 +12,7 @@ pub struct ProcessInfo {
     pub ppid: u32,
     #[allow(dead_code)]
     pub uid: u32,
-    pub user: String,
+    pub user: Text,
     pub state: ProcessState,
     pub priority: i32,
     pub nice: i32,
@@ -21,15 +26,15 @@ pub struct ProcessInfo {
     pub net_rx_bytes: u64,
     pub net_tx_bytes: u64,
     pub net_rate: f64,
-    pub net_ifname: String,
+    pub net_ifname: Text,
     pub cpu_time_secs: f64,
     #[allow(dead_code)]
     pub start_time_ns: u64,
-    pub comm: String,
-    pub cmdline: String,
-    pub container: Option<String>,
-    pub service: Option<String>,
-    pub cgroup_path: String,
+    pub comm: Text,
+    pub cmdline: Text,
+    pub container: Option<Text>,
+    pub service: Option<Text>,
+    pub cgroup_path: Text,
     /// Children PIDs for tree view.
     pub children: Vec<u32>,
     /// Previous utime+stime for delta calculation.
@@ -124,6 +129,9 @@ impl ProcessInfo {
         self.net_tx_bytes = src.net_tx_bytes;
         self.net_rate = src.net_rate;
         self.net_ifname = src.net_ifname.clone();
+        self.user = src.user.clone();
+        self.container = src.container.clone();
+        self.cgroup_path = src.cgroup_path.clone();
         self.cpu_time_secs = src.cpu_time_secs;
         self.comm = src.comm.clone();
         self.cmdline = src.cmdline.clone();
@@ -163,11 +171,11 @@ impl ProcessInfo {
                 self.cmdline,
             ),
             YankField::Pid => self.pid.to_string(),
-            YankField::User => self.user.clone(),
-            YankField::Container => self.container.clone().unwrap_or_else(|| "-".to_string()),
-            YankField::Service => self.service.clone().unwrap_or_else(|| "-".to_string()),
-            YankField::Name => self.comm.clone(),
-            YankField::Cmdline => self.cmdline.clone(),
+            YankField::User => self.user.to_string(),
+            YankField::Container => self.container.as_deref().unwrap_or("-").to_string(),
+            YankField::Service => self.service.as_deref().unwrap_or("-").to_string(),
+            YankField::Name => self.comm.to_string(),
+            YankField::Cmdline => self.cmdline.to_string(),
             YankField::GpuPercent => format!("{:.1}", self.gpu_percent),
             YankField::GpuMem => format_bytes(self.gpu_mem_bytes),
         }
@@ -314,17 +322,17 @@ pub fn compare_processes(a: &ProcessInfo, b: &ProcessInfo, col: SortColumn, asce
 }
 
 /// Filter processes by a search string (matches against comm and cmdline).
-pub fn matches_filter(proc: &ProcessInfo, filter: &str) -> bool {
+/// `filter_lower` is `filter.to_lowercase()`, computed once by the caller.
+pub fn matches_filter(proc: &ProcessInfo, filter: &str, filter_lower: &str) -> bool {
     if filter.is_empty() {
         return true;
     }
-    let filter_lower = filter.to_lowercase();
-    proc.comm.to_lowercase().contains(&filter_lower)
-        || proc.cmdline.to_lowercase().contains(&filter_lower)
+    proc.comm.to_lowercase().contains(filter_lower)
+        || proc.cmdline.to_lowercase().contains(filter_lower)
         || proc.pid.to_string().contains(filter)
-        || proc.user.to_lowercase().contains(&filter_lower)
-        || proc.service.as_deref().is_some_and(|s| s.to_lowercase().contains(&filter_lower))
-        || (!proc.net_ifname.is_empty() && proc.net_ifname.to_lowercase().contains(&filter_lower))
+        || proc.user.to_lowercase().contains(filter_lower)
+        || proc.service.as_deref().is_some_and(|s| s.to_lowercase().contains(filter_lower))
+        || (!proc.net_ifname.is_empty() && proc.net_ifname.to_lowercase().contains(filter_lower))
 }
 
 /// Decode raw process text (cmdline, comm) for display: lossy UTF-8, with
@@ -388,7 +396,7 @@ mod tests {
             pid,
             ppid: 1,
             uid: 1000,
-            user: String::from("test"),
+            user: Text::from("test"),
             state: ProcessState::Sleeping,
             priority: 20,
             nice: 0,
@@ -402,14 +410,14 @@ mod tests {
             net_rx_bytes: 0,
             net_tx_bytes: 0,
             net_rate: 0.0,
-            net_ifname: String::new(),
+            net_ifname: Text::from(""),
             cpu_time_secs: 0.0,
             start_time_ns: 0,
-            comm: String::from("test"),
-            cmdline: String::from("test"),
+            comm: Text::from("test"),
+            cmdline: Text::from("test"),
             container: None,
             service: None,
-            cgroup_path: String::new(),
+            cgroup_path: Text::from(""),
             children: Vec::new(),
             prev_cpu_ns: 0,
             is_kernel_thread: false,

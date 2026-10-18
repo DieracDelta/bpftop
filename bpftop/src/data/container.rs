@@ -4,6 +4,8 @@ use std::os::unix::fs::{DirEntryExt, MetadataExt};
 use std::path::Path;
 use std::time::{Duration, Instant};
 
+use super::process::Text;
+
 /// Container runtime information for a process.
 #[derive(Debug, Clone)]
 pub struct ContainerInfo {
@@ -48,21 +50,29 @@ const MIN_REFRESH_INTERVAL: Duration = Duration::from_secs(2);
 /// is only re-walked when a task shows up in a cgroup we haven't seen.
 pub struct CgroupResolver {
     /// cgroup inode ID → cgroup path (e.g. "/system.slice/docker-abc.scope")
-    id_to_path: HashMap<u64, String>,
-    /// cgroup path → parsed container info (cache)
-    path_to_container: HashMap<String, Option<ContainerInfo>>,
+    id_to_path: HashMap<u64, Text>,
+    /// cgroup path → container name (cache)
+    path_to_container: HashMap<Text, Option<Text>>,
+    /// Returned for unknown cgroup IDs.
+    empty: Text,
     last_refresh: Instant,
 }
 
 impl CgroupResolver {
     pub fn new() -> Self {
-        let mut resolver = Self {
+        let mut resolver = Self::empty();
+        resolver.refresh_inode_map();
+        resolver
+    }
+
+    /// A resolver that knows no cgroups (and doesn't walk cgroupfs).
+    pub fn empty() -> Self {
+        Self {
             id_to_path: HashMap::new(),
             path_to_container: HashMap::new(),
             last_refresh: Instant::now(),
-        };
-        resolver.refresh_inode_map();
-        resolver
+            empty: Text::from(""),
+        }
     }
 
     /// Call once per collect cycle with every task's cgroup ID. Re-walks
@@ -77,9 +87,9 @@ impl CgroupResolver {
         }
     }
 
-    /// Resolve a cgroup inode ID (from BPF) to container info.
+    /// Resolve a cgroup inode ID (from BPF) to a container name.
     /// Returns None for non-container cgroups.
-    pub fn resolve(&mut self, cgroup_id: u64) -> Option<ContainerInfo> {
+    pub fn resolve(&mut self, cgroup_id: u64) -> Option<Text> {
         if cgroup_id == 0 {
             return None;
         }
@@ -90,17 +100,17 @@ impl CgroupResolver {
             return cached.clone();
         }
 
-        let info = parse_container_from_cgroup(path);
-        self.path_to_container.insert(path.clone(), info.clone());
-        info
+        let name = parse_container_from_cgroup(path).map(|c| Text::from(c.name));
+        self.path_to_container.insert(path.clone(), name.clone());
+        name
     }
 
     /// Also return the cgroup path string for a given cgroup_id.
-    pub fn resolve_path(&self, cgroup_id: u64) -> String {
+    pub fn resolve_path(&self, cgroup_id: u64) -> Text {
         self.id_to_path
             .get(&cgroup_id)
-            .cloned()
-            .unwrap_or_default()
+            .unwrap_or(&self.empty)
+            .clone()
     }
 
     /// Walk /sys/fs/cgroup/ and map inode numbers to cgroup paths.
@@ -109,7 +119,7 @@ impl CgroupResolver {
         self.last_refresh = Instant::now();
         let base = Path::new("/sys/fs/cgroup");
         if let Ok(meta) = fs::metadata(base) {
-            self.id_to_path.insert(meta.ino(), "/".to_string());
+            self.id_to_path.insert(meta.ino(), Text::from("/"));
             self.walk_cgroup_tree(base, "");
         }
     }
@@ -129,7 +139,7 @@ impl CgroupResolver {
             }
             let name = entry.file_name();
             let child_rel = format!("{rel}/{}", name.to_string_lossy());
-            self.id_to_path.insert(entry.ino(), child_rel.clone());
+            self.id_to_path.insert(entry.ino(), Text::from(child_rel.as_str()));
             self.walk_cgroup_tree(&entry.path(), &child_rel);
         }
     }
