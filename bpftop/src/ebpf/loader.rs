@@ -8,6 +8,8 @@ use aya::programs::{FExit, KProbe, TracePoint};
 use aya::{Btf, Ebpf};
 use bpftop_common::{parse_iter_records, CmdlineEvent, IterRecords};
 
+use crate::data::process::display_text;
+
 /// The compiled eBPF object. Built before the userspace crate is compiled.
 ///
 /// Path is relative to this source file:
@@ -172,8 +174,7 @@ impl EbpfLoader {
 
         let len = (event.len as usize).min(event.cmdline.len());
         let raw = &event.cmdline[..len];
-        // cmdline uses NUL as separator between args; replace with spaces
-        let s = String::from_utf8_lossy(raw).replace('\0', " ").trim().to_string();
+        let s = display_text(raw);
         if s.is_empty() {
             None
         } else {
@@ -278,8 +279,8 @@ pub fn seed_cmdlines_from_proc(loader: &mut EbpfLoader) {
             Err(_) => continue,
         };
 
-        let cmdline = match fs::read_to_string(format!("/proc/{pid}/cmdline")) {
-            Ok(s) => s.replace('\0', " ").trim().to_string(),
+        let cmdline = match fs::read(format!("/proc/{pid}/cmdline")) {
+            Ok(raw) => display_text(&raw),
             Err(_) => continue,
         };
         if cmdline.is_empty() {

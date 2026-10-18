@@ -6,7 +6,7 @@ use anyhow::Result;
 use super::container::CgroupResolver;
 #[cfg(feature = "gpu")]
 use super::gpu::GpuCollector;
-use super::process::{ProcessInfo, ProcessState};
+use super::process::{display_text, ProcessInfo, ProcessState};
 use super::system::*;
 use crate::ebpf::loader::{self, EbpfLoader};
 
@@ -424,7 +424,7 @@ impl Collector {
 /// Convert a null-terminated comm byte array to a String.
 fn comm_to_string(comm: &[u8; 16]) -> String {
     let nul = comm.iter().position(|&b| b == 0).unwrap_or(16);
-    String::from_utf8_lossy(&comm[..nul]).to_string()
+    display_text(&comm[..nul])
 }
 
 fn resolve_username(uid: u32) -> String {

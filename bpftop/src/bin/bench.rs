@@ -153,7 +153,6 @@ fn main() -> Result<()> {
     }
 
     if cli.dump {
-        let clean = |s: &str| s.replace(|c: char| c.is_control(), " ");
         for p in &last_procs {
             println!(
                 "{}\t{}\t{}\t{}\t{}\t{}\t{:.1}\t{}",
@@ -164,7 +163,7 @@ fn main() -> Result<()> {
                 p.net_rx_bytes,
                 p.net_ifname,
                 p.cpu_percent,
-                clean(&p.cmdline)
+                p.cmdline
             );
         }
         return Ok(());

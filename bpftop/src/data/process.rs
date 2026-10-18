@@ -327,6 +327,18 @@ pub fn matches_filter(proc: &ProcessInfo, filter: &str) -> bool {
         || (!proc.net_ifname.is_empty() && proc.net_ifname.to_lowercase().contains(&filter_lower))
 }
 
+/// Decode raw process text (cmdline, comm) for display: lossy UTF-8, with
+/// control characters (the NUL arg separators, but also newlines or
+/// escape sequences a process put in its own argv) shown as spaces.
+pub fn display_text(raw: &[u8]) -> String {
+    String::from_utf8_lossy(raw)
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect::<String>()
+        .trim()
+        .to_string()
+}
+
 /// Format bytes into human-readable form (K, M, G).
 pub fn format_bytes(bytes: u64) -> String {
     if bytes >= 1024 * 1024 * 1024 {
@@ -407,6 +419,13 @@ mod tests {
             frozen: false,
             tree_prefix: String::new(),
         }
+    }
+
+    #[test]
+    fn display_text_replaces_control_chars() {
+        assert_eq!(display_text(b"python3\0-c\0import os\nos.exit()\0"), "python3 -c import os os.exit()");
+        assert_eq!(display_text(b"\x1b[31mred\0"), "[31mred");
+        assert_eq!(display_text(b"caf\xc3\xa9"), "caf\u{e9}");
     }
 
     #[test]
