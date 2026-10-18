@@ -208,7 +208,7 @@ impl EbpfLoader {
         event.cmdline[..copy_len].copy_from_slice(&bytes[..copy_len]);
         event.len = copy_len as u32;
 
-        hash.insert(pid, event, 0)
+        hash.insert(&pid, &event, 0)
             .context("inserting into CMDLINE_MAP")?;
         Ok(())
     }

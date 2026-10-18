@@ -24,10 +24,8 @@ bpftop-common = { workspace = true }
 aya = { workspace = true }
 ratatui = { workspace = true }
 crossterm = { workspace = true }
-tokio = { workspace = true }
 serde = { workspace = true }
 toml = { workspace = true }
-bollard = { workspace = true }
 nix = { workspace = true }
 dirs = { workspace = true }
 clap = { workspace = true }

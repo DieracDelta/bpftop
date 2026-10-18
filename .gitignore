@@ -1,0 +1,5 @@
+/target/
+/bpftop-ebpf/target/
+/bpftop-ebpf-c/target/
+/result*
+/.pi/

@@ -1,27 +1,30 @@
-//! Headless benchmark binary for bpftop's BPF collection pipeline.
+//! Headless benchmark for bpftop's collection pipeline.
 //!
-//! Follows the diagnose.rs pattern: self-contained, loads BPF directly.
-//! Runs the BPF task iterator + /proc system stats in a loop and outputs
-//! timing data as JSON.
+//! Drives the real `Collector::collect()` (BPF iterator, per-process
+//! enrichment, /proc system stats, net stats) in a loop, so syscall
+//! counts and timings match what the TUI's background thread does.
 //!
 //! Run: sudo ./target/release/bench --iterations 50 --json
+//! Syscalls per cycle: compare `strace -fc` of `--iterations 1` vs `--iterations 21`.
 
-use std::io::Read;
-use std::time::Instant;
+#[allow(dead_code)]
+#[path = "../data/mod.rs"]
+mod data;
+#[allow(dead_code)]
+#[path = "../ebpf/mod.rs"]
+mod ebpf;
+
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
-use aya::programs::iter::{Iter, IterLink};
-use aya::programs::TracePoint;
-use aya::{Btf, Ebpf};
-use bpftop_common::TaskInfo;
 use clap::Parser;
 use serde::Serialize;
 
-static BPF_OBJ: &[u8] =
-    aya::include_bytes_aligned!("../../../bpftop-ebpf/target/bpfel-unknown-none/release/bpftop-ebpf");
+use data::collector::{CollectTimings, Collector};
+use ebpf::loader::EbpfLoader;
 
 #[derive(Parser)]
-#[command(name = "bench", about = "Benchmark bpftop BPF collection pipeline")]
+#[command(name = "bench", about = "Benchmark bpftop's collection pipeline")]
 struct Cli {
     /// Number of timed iterations
     #[arg(short, long, default_value_t = 50)]
@@ -41,8 +44,11 @@ struct BenchResult {
     iterations: usize,
     warmup: usize,
     process_count: usize,
+    task_count: u32,
     timings_us: Vec<f64>,
     stats: Stats,
+    /// Median wall time per collect() phase.
+    phases_median_us: Phases,
     system: SystemMeta,
 }
 
@@ -57,6 +63,17 @@ struct Stats {
     stddev_us: f64,
 }
 
+#[derive(Serialize, Default)]
+struct Phases {
+    system_stats: f64,
+    cgroup_tick: f64,
+    bpf_iter: f64,
+    per_process: f64,
+    gpu: f64,
+    net: f64,
+    tree: f64,
+}
+
 #[derive(Serialize)]
 struct SystemMeta {
     kernel: String,
@@ -68,125 +85,99 @@ struct SystemMeta {
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
-    // Load eBPF programs
     eprintln!("Loading eBPF programs...");
-    let mut bpf = Ebpf::load(BPF_OBJ).context("loading eBPF object")?;
-    let btf = Btf::from_sys_fs().context("reading kernel BTF")?;
-
-    // Load task iterator
-    let iter_prog: &mut Iter = bpf
-        .program_mut("dump_task")
-        .context("dump_task not found")?
-        .try_into()
-        .context("not an Iter")?;
-    iter_prog.load("task", &btf).context("loading dump_task")?;
-
-    // Load tracepoints (needed for realistic pipeline)
-    load_tracepoint(&mut bpf, "capture_cmdline", "sched", "sched_process_exec")?;
-    load_tracepoint(&mut bpf, "cleanup_cmdline", "sched", "sched_process_exit")?;
+    let loader = EbpfLoader::load().context("loading eBPF")?;
+    let mut collector = Collector::new(loader);
 
     eprintln!("BPF loaded. Running {} warmup iterations...", cli.warmup);
-
-    // Warmup
-    let mut last_count = 0;
     for _ in 0..cli.warmup {
-        let tasks = collect_once(&mut bpf)?;
-        last_count = tasks.len();
+        collector.collect()?;
     }
-    eprintln!("Warmup done. {} tasks seen. Running {} timed iterations...", last_count, cli.iterations);
 
-    // Timed iterations
     let mut timings_us = Vec::with_capacity(cli.iterations);
+    let mut phases = Vec::with_capacity(cli.iterations);
     let mut process_count = 0;
+    let mut task_count = 0;
 
     for i in 0..cli.iterations {
         let start = Instant::now();
-        let tasks = collect_once(&mut bpf)?;
+        let (sys, procs) = collector.collect()?;
         let elapsed = start.elapsed();
 
-        process_count = tasks.len();
-        timings_us.push(elapsed.as_secs_f64() * 1_000_000.0);
+        process_count = procs.len();
+        task_count = sys.total_tasks + sys.user_threads + sys.kernel_threads;
+        timings_us.push(us(elapsed));
+        phases.push(collector.last_timings);
 
         if !cli.json && (i + 1) % 10 == 0 {
-            eprintln!("  [{}/{}] {:.0} µs, {} tasks",
-                i + 1, cli.iterations, timings_us.last().unwrap(), process_count);
+            eprintln!(
+                "  [{}/{}] {:.0} µs, {} processes",
+                i + 1,
+                cli.iterations,
+                timings_us.last().unwrap(),
+                process_count
+            );
         }
     }
-
-    let stats = compute_stats(&timings_us);
-    let system = get_system_meta();
 
     let result = BenchResult {
         iterations: cli.iterations,
         warmup: cli.warmup,
         process_count,
+        task_count,
+        stats: compute_stats(&timings_us),
+        phases_median_us: median_phases(&phases),
         timings_us,
-        stats,
-        system,
+        system: get_system_meta(),
     };
 
     if cli.json {
         println!("{}", serde_json::to_string_pretty(&result)?);
-    } else {
+    } else if !result.timings_us.is_empty() {
+        let p = &result.phases_median_us;
         eprintln!("\n=== bpftop Benchmark Results ===");
-        eprintln!("Iterations: {}", result.iterations);
-        eprintln!("Process count: {}", result.process_count);
+        eprintln!("Iterations:    {}", result.iterations);
+        eprintln!("Processes:     {}", result.process_count);
+        eprintln!("Tasks:         {}", result.task_count);
         eprintln!("Min:    {:.1} µs", result.stats.min_us);
-        eprintln!("Max:    {:.1} µs", result.stats.max_us);
-        eprintln!("Mean:   {:.1} µs", result.stats.mean_us);
         eprintln!("Median: {:.1} µs", result.stats.median_us);
         eprintln!("P95:    {:.1} µs", result.stats.p95_us);
-        eprintln!("P99:    {:.1} µs", result.stats.p99_us);
-        eprintln!("Stddev: {:.1} µs", result.stats.stddev_us);
+        eprintln!("Max:    {:.1} µs", result.stats.max_us);
+        eprintln!("Phases (median µs): system={:.0} cgroup_tick={:.0} bpf_iter={:.0} per_process={:.0} gpu={:.0} net={:.0} tree={:.0}",
+            p.system_stats, p.cgroup_tick, p.bpf_iter, p.per_process, p.gpu, p.net, p.tree);
     }
 
     Ok(())
 }
 
-/// Run one full collection cycle: BPF iterator walk + parse tasks.
-/// This is the core operation being benchmarked.
-fn collect_once(bpf: &mut Ebpf) -> Result<Vec<TaskInfo>> {
-    // Run the BPF task iterator
-    let prog: &mut Iter = bpf
-        .program_mut("dump_task")
-        .context("dump_task not found")?
-        .try_into()
-        .context("not an Iter")?;
-
-    let link_id = prog.attach().context("attach")?;
-    let link: IterLink = prog.take_link(link_id).context("take_link")?;
-    let mut file = link.into_file().context("into_file")?;
-
-    let mut buf = Vec::with_capacity(64 * 1024);
-    file.read_to_end(&mut buf).context("read iterator")?;
-
-    let task_size = std::mem::size_of::<TaskInfo>();
-    let tasks: Vec<TaskInfo> = buf
-        .chunks_exact(task_size)
-        .map(|chunk| unsafe { std::ptr::read_unaligned(chunk.as_ptr() as *const TaskInfo) })
-        .collect();
-
-    // Also read /proc system stats (this is what bpftop does each cycle)
-    let _ = std::fs::read_to_string("/proc/stat");
-    let _ = std::fs::read_to_string("/proc/meminfo");
-    let _ = std::fs::read_to_string("/proc/loadavg");
-    let _ = std::fs::read_to_string("/proc/uptime");
-
-    Ok(tasks)
+fn us(d: Duration) -> f64 {
+    d.as_secs_f64() * 1_000_000.0
 }
 
-fn load_tracepoint(bpf: &mut Ebpf, name: &str, category: &str, tp: &str) -> Result<()> {
-    let prog: &mut TracePoint = bpf
-        .program_mut(name)
-        .context(format!("{name} not found"))?
-        .try_into()
-        .context(format!("{name} not a TracePoint"))?;
-    prog.load().context(format!("loading {name}"))?;
-    prog.attach(category, tp).context(format!("attaching {name}"))?;
-    Ok(())
+fn median_phases(phases: &[CollectTimings]) -> Phases {
+    if phases.is_empty() {
+        return Phases::default();
+    }
+    let med = |f: fn(&CollectTimings) -> Duration| {
+        let mut v: Vec<f64> = phases.iter().map(|t| us(f(t))).collect();
+        v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        v[v.len() / 2]
+    };
+    Phases {
+        system_stats: med(|t| t.system_stats),
+        cgroup_tick: med(|t| t.cgroup_tick),
+        bpf_iter: med(|t| t.bpf_iter),
+        per_process: med(|t| t.per_process),
+        gpu: med(|t| t.gpu),
+        net: med(|t| t.net),
+        tree: med(|t| t.tree),
+    }
 }
 
 fn compute_stats(timings: &[f64]) -> Stats {
+    if timings.is_empty() {
+        return Stats { min_us: 0.0, max_us: 0.0, mean_us: 0.0, median_us: 0.0, p95_us: 0.0, p99_us: 0.0, stddev_us: 0.0 };
+    }
     let mut sorted = timings.to_vec();
     sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
 
@@ -197,17 +188,13 @@ fn compute_stats(timings: &[f64]) -> Stats {
     let variance: f64 = sorted.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / n;
     let stddev = variance.sqrt();
 
-    let median = percentile(&sorted, 50.0);
-    let p95 = percentile(&sorted, 95.0);
-    let p99 = percentile(&sorted, 99.0);
-
     Stats {
         min_us: sorted[0],
         max_us: *sorted.last().unwrap(),
         mean_us: mean,
-        median_us: median,
-        p95_us: p95,
-        p99_us: p99,
+        median_us: percentile(&sorted, 50.0),
+        p95_us: percentile(&sorted, 95.0),
+        p99_us: percentile(&sorted, 99.0),
         stddev_us: stddev,
     }
 }
@@ -227,11 +214,7 @@ fn get_system_meta() -> SystemMeta {
 
     let arch = std::env::consts::ARCH.to_string();
 
-    let cpus = std::fs::read_to_string("/proc/cpuinfo")
-        .unwrap_or_default()
-        .lines()
-        .filter(|l| l.starts_with("processor"))
-        .count();
+    let cpus = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
 
     let hostname = std::fs::read_to_string("/proc/sys/kernel/hostname")
         .unwrap_or_default()

@@ -22,6 +22,8 @@
             };
             inherit system;
           });
+      # Single LLVM for the BPF object in both the package and the dev shell.
+      llvmFor = pkgs: pkgs.llvmPackages_23;
     in {
       packages = forAllSystems ({ pkgs, system }:
         let
@@ -31,7 +33,7 @@
 
           workspaceVendor = pkgs.rustPlatform.fetchCargoVendor {
             src = ./.;
-            hash = "sha256-ECV4yHAsu/QX9YwT0jwV7lity0xtPnE+frc1CjHdSH4=";
+            hash = "sha256-85fpj96ncyt/S9ybbIctkogrZ71k+Pl1wjrODFeeUHs=";
           };
 
           mkBpftop = { pname, rustToolchain, cargoTarget ? null, extraNativeBuildInputs ? [], env ? {} }:
@@ -49,8 +51,8 @@
 
               nativeBuildInputs = [
                 rustToolchain
-                pkgs.llvmPackages_22.clang-unwrapped
-                pkgs.llvmPackages_22.llvm
+                (llvmFor pkgs).clang-unwrapped
+                (llvmFor pkgs).llvm
                 pkgs.libbpf
                 pkgs.pkg-config
               ] ++ extraNativeBuildInputs;
@@ -143,9 +145,11 @@
             })
             # rust-analyzer via fenix
             fenix.packages.${system}.rust-analyzer
-            # eBPF tooling
-            llvmPackages.clang
-            llvmPackages.llvm
+            # eBPF tooling. Unwrapped clang: the cc-wrapper injects hardening
+            # flags (-fzero-call-used-regs, -fstack-protector) that the bpf
+            # target rejects.
+            (llvmFor pkgs).clang-unwrapped
+            (llvmFor pkgs).llvm
             libbpf
             bpftools
             # Build deps
@@ -161,7 +165,7 @@
             agg
           ];
 
-          LIBCLANG_PATH = "${pkgs.llvmPackages.libclang.lib}/lib";
+          LIBCLANG_PATH = "${(llvmFor pkgs).libclang.lib}/lib";
 
           shellHook = ''
             # bpf-linker is installed via: cargo install bpf-linker
