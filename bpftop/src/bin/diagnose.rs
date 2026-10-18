@@ -11,7 +11,7 @@ use aya::maps::HashMap as BpfHashMap;
 use aya::programs::iter::{Iter, IterLink};
 use aya::programs::TracePoint;
 use aya::{Btf, Ebpf};
-use bpftop_common::{CmdlineEvent, TaskInfo};
+use bpftop_common::{parse_iter_records, CmdlineEvent, TaskInfo};
 
 /// Path relative to this file (src/bin/diagnose.rs):
 ///   ../../../../bpftop-ebpf/target/bpfel-unknown-none/release/bpftop-ebpf
@@ -185,16 +185,18 @@ fn main() {
     // ── Step 9: Validate TaskInfo struct alignment ────────────
     print_step(9, "Validate TaskInfo struct alignment");
     let task_size = std::mem::size_of::<TaskInfo>();
-    let count = buf.len() / task_size;
-    let remainder = buf.len() % task_size;
+    let parsed = parse_iter_records(&buf);
+    let count = parsed.as_ref().map(|r| r.tasks.len()).unwrap_or(0);
     println!("  TaskInfo size (userspace): {} bytes", task_size);
     println!("  Total bytes from iterator: {}", buf.len());
     println!("  Task count: {count}");
-    println!("  Remainder bytes: {remainder}");
-    if remainder != 0 {
+    if let Ok(r) = &parsed {
+        println!("  Thread records: {}", r.thread_records);
+    }
+    if let Err(off) = parsed {
         report(
             &Err::<String, _>(format!(
-                "BPF-side TaskInfo size differs! remainder={remainder} (BPF writes different size)"
+                "truncated record at byte {off}: BPF-side record sizes differ from userspace"
             )),
             &mut pass,
             &mut fail,
@@ -215,10 +217,7 @@ fn main() {
 
     // ── Step 10: Validate sample data ─────────────────────────
     print_step(10, "Validate sample data");
-    let tasks: Vec<TaskInfo> = buf
-        .chunks_exact(task_size)
-        .map(|chunk| unsafe { std::ptr::read_unaligned(chunk.as_ptr() as *const TaskInfo) })
-        .collect();
+    let tasks: Vec<TaskInfo> = parse_iter_records(&buf).map(|r| r.tasks).unwrap_or_default();
 
     // Show first 20 tasks
     println!("  Sample tasks (first 20):");
@@ -245,7 +244,7 @@ fn main() {
         .count();
 
     println!("\n  Statistics:");
-    println!("    Total tasks (including threads): {total_tasks}");
+    println!("    Total processes (thread-group leaders): {total_tasks}");
     println!("    Unique PIDs: {}", unique_pids.len());
     println!("    Non-zero PIDs: {nonzero_pids}");
     println!("    Non-zero comm: {nonzero_comm}");

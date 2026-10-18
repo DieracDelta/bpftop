@@ -1,14 +1,12 @@
 use std::fs;
-use std::io::Read;
-
-use std::collections::HashMap;
+use std::io::{ErrorKind, Read};
 
 use anyhow::{Context, Result};
 use aya::maps::HashMap as BpfHashMap;
 use aya::programs::iter::{Iter, IterLink};
 use aya::programs::{KProbe, TracePoint};
 use aya::{Btf, Ebpf};
-use bpftop_common::{CmdlineEvent, NetStats, TaskInfo};
+use bpftop_common::{parse_iter_records, CmdlineEvent, IterRecords};
 
 /// The compiled eBPF object. Built before the userspace crate is compiled.
 ///
@@ -19,9 +17,24 @@ use bpftop_common::{CmdlineEvent, NetStats, TaskInfo};
 static BPF_OBJ: &[u8] =
     aya::include_bytes_aligned!("../../../bpftop-ebpf-c/target/bpftop.bpf.o");
 
+/// The kernel hands out BPF iterator output in chunks of at most
+/// PAGE_SIZE << 3 bytes, so each read() asks for at least that much.
+const ITER_READ_CHUNK: usize = 64 * 1024;
+
+/// Kernel functions traced for per-process network bytes, with the
+/// kprobe/kretprobe pair that implements each.
+const NET_PROBES: &[(&str, &str, Option<&str>)] = &[
+    ("tcp_sendmsg", "kprobe_tcp_sendmsg", None),
+    ("udp_sendmsg", "kprobe_udp_sendmsg", None),
+    ("tcp_recvmsg", "kprobe_tcp_recvmsg", Some("kretprobe_tcp_recvmsg")),
+    ("udp_recvmsg", "kprobe_udp_recvmsg", Some("kretprobe_udp_recvmsg")),
+];
+
 /// Manages eBPF program loading, attachment, and data retrieval.
 pub struct EbpfLoader {
     bpf: Option<Ebpf>,
+    /// Iterator output buffer, reused across cycles.
+    iter_buf: Vec<u8>,
 }
 
 impl EbpfLoader {
@@ -63,52 +76,26 @@ impl EbpfLoader {
             .context("attaching cleanup_cmdline")?;
 
         // Load and attach network kprobes/kretprobes
-        for (prog_name, func_name) in &[
-            ("kprobe_tcp_sendmsg", "tcp_sendmsg"),
-            ("kprobe_udp_sendmsg", "udp_sendmsg"),
-            ("kprobe_tcp_recvmsg", "tcp_recvmsg"),
-            ("kprobe_udp_recvmsg", "udp_recvmsg"),
-        ] {
-            let prog: &mut KProbe = bpf
-                .program_mut(prog_name)
-                .context(format!("{prog_name} not found"))?
-                .try_into()
-                .context(format!("{prog_name} is not a KProbe"))?;
-            prog.load().context(format!("loading {prog_name}"))?;
-            prog.attach(func_name, 0)
-                .context(format!("attaching {prog_name}"))?;
-        }
-        for (prog_name, func_name) in &[
-            ("kretprobe_tcp_recvmsg", "tcp_recvmsg"),
-            ("kretprobe_udp_recvmsg", "udp_recvmsg"),
-        ] {
-            let prog: &mut KProbe = bpf
-                .program_mut(prog_name)
-                .context(format!("{prog_name} not found"))?
-                .try_into()
-                .context(format!("{prog_name} is not a KProbe"))?;
-            prog.load().context(format!("loading {prog_name}"))?;
-            prog.attach(func_name, 0)
-                .context(format!("attaching {prog_name}"))?;
-        }
+        attach_net_kprobes(&mut bpf)?;
 
-        Ok(Self { bpf: Some(bpf) })
+        Ok(Self { bpf: Some(bpf), iter_buf: Vec::new() })
     }
 
     /// Create a no-op loader (used as placeholder after moving the real one).
     pub fn noop() -> Self {
-        Self { bpf: None }
+        Self { bpf: None, iter_buf: Vec::new() }
     }
 
     pub fn is_loaded(&self) -> bool {
         self.bpf.is_some()
     }
 
-    /// Run the task iterator once, returning all TaskInfo structs.
+    /// Run the task iterator once, returning a TaskInfo per thread-group
+    /// leader plus the CPU time of every other live thread.
     ///
     /// Each call creates a new iterator link, reads all output, and
     /// drops the link. The iterator walks every task in the kernel.
-    pub fn read_tasks(&mut self) -> Result<Vec<TaskInfo>> {
+    pub fn read_tasks(&mut self) -> Result<IterRecords> {
         let bpf = self
             .bpf
             .as_mut()
@@ -126,21 +113,29 @@ impl EbpfLoader {
             .context("taking dump_task link")?;
         let mut file = link.into_file().context("creating iterator file")?;
 
-        let mut buf = Vec::with_capacity(64 * 1024);
-        file.read_to_end(&mut buf)
-            .context("reading iterator output")?;
+        let buf = &mut self.iter_buf;
+        buf.clear();
+        loop {
+            let len = buf.len();
+            buf.resize(len + ITER_READ_CHUNK, 0);
+            match file.read(&mut buf[len..]) {
+                Ok(0) => {
+                    buf.truncate(len);
+                    break;
+                }
+                Ok(n) => buf.truncate(len + n),
+                Err(e) if e.kind() == ErrorKind::Interrupted => buf.truncate(len),
+                Err(e) => return Err(e).context("reading iterator output"),
+            }
+        }
 
-        let task_size = std::mem::size_of::<TaskInfo>();
-        let tasks: Vec<TaskInfo> = buf
-            .chunks_exact(task_size)
-            .map(|chunk| unsafe { std::ptr::read_unaligned(chunk.as_ptr() as *const TaskInfo) })
-            .collect();
-
-        Ok(tasks)
+        parse_iter_records(buf)
+            .map_err(|off| anyhow::anyhow!("truncated iterator record at byte {off} of {}", buf.len()))
     }
 
-    /// Look up a cmdline for a PID from the BPF CMDLINE_MAP.
-    pub fn get_cmdline(&self, pid: u32) -> Option<String> {
+    /// Look up a cmdline for a PID from the BPF CMDLINE_MAP, returning the
+    /// entry's generation along with it.
+    pub fn get_cmdline(&self, pid: u32) -> Option<(u64, String)> {
         let bpf = self.bpf.as_ref()?;
         let map = bpf.map("CMDLINE_MAP")?;
         let hash = BpfHashMap::<_, u32, CmdlineEvent>::try_from(map).ok()?;
@@ -158,32 +153,8 @@ impl EbpfLoader {
         if s.is_empty() {
             None
         } else {
-            Some(s)
+            Some((event.gen, s))
         }
-    }
-
-    /// Read per-PID network stats from the BPF NET_STATS map.
-    /// Returns a map of pid -> (tx_bytes, rx_bytes, ifindex).
-    pub fn read_net_stats(&self) -> HashMap<u32, (u64, u64, u32)> {
-        let mut result = HashMap::new();
-        let bpf = match self.bpf.as_ref() {
-            Some(b) => b,
-            None => return result,
-        };
-        let map = match bpf.map("NET_STATS") {
-            Some(m) => m,
-            None => return result,
-        };
-        let hash = match BpfHashMap::<_, u32, NetStats>::try_from(map) {
-            Ok(h) => h,
-            Err(_) => return result,
-        };
-        for item in hash.iter() {
-            if let Ok((pid, stats)) = item {
-                result.insert(pid, (stats.tx_bytes, stats.rx_bytes, stats.ifindex));
-            }
-        }
-        result
     }
 
     /// Insert a cmdline entry into the BPF map (used for startup seeding).
@@ -202,6 +173,8 @@ impl EbpfLoader {
             pid,
             len: 0,
             cmdline: [0u8; 256],
+            // Exec'd entries use ktime, which is never 1.
+            gen: 1,
         };
         let bytes = cmdline.as_bytes();
         let copy_len = bytes.len().min(255);
@@ -212,6 +185,22 @@ impl EbpfLoader {
             .context("inserting into CMDLINE_MAP")?;
         Ok(())
     }
+}
+
+fn attach_net_kprobes(bpf: &mut Ebpf) -> Result<()> {
+    for &(func, entry, ret) in NET_PROBES {
+        for prog_name in std::iter::once(entry).chain(ret) {
+            let prog: &mut KProbe = bpf
+                .program_mut(prog_name)
+                .with_context(|| format!("{prog_name} not found"))?
+                .try_into()
+                .with_context(|| format!("{prog_name} is not a KProbe"))?;
+            prog.load().with_context(|| format!("loading {prog_name}"))?;
+            prog.attach(func, 0)
+                .with_context(|| format!("attaching {prog_name}"))?;
+        }
+    }
+    Ok(())
 }
 
 /// One-shot scan of /proc/*/cmdline to seed the CMDLINE_MAP for

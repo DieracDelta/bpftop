@@ -3,7 +3,6 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 
-use super::cgroup_control;
 use super::container::CgroupResolver;
 #[cfg(feature = "gpu")]
 use super::gpu::GpuCollector;
@@ -24,14 +23,26 @@ pub struct CollectTimings {
     pub tree: Duration,
 }
 
+/// How long resolved usernames are trusted before being looked up again.
+const USERNAME_TTL: Duration = Duration::from_secs(60);
+
 /// Orchestrates data collection from eBPF programs.
 ///
 /// System-wide stats still come from /proc/stat, /proc/meminfo, etc.
-/// All per-process data comes from the BPF task iterator and CMDLINE_MAP.
-/// No per-PID /proc reads occur after startup.
+/// All per-process data comes from the BPF task iterator, which also joins
+/// in NET_STATS and the CMDLINE_MAP generation. No per-PID /proc reads
+/// occur after startup, and in the steady state no per-PID syscalls at all:
+/// a cmdline is fetched from CMDLINE_MAP only when its generation changes,
+/// and usernames are cached per uid.
 pub struct Collector {
     ebpf: EbpfLoader,
+    system: Option<SystemReader>,
     cgroup_resolver: CgroupResolver,
+    /// pid → (CMDLINE_MAP generation, cmdline)
+    cmdline_cache: HashMap<u32, (u64, String)>,
+    /// uid → username (or the uid as a string if it has no passwd entry)
+    username_cache: HashMap<u32, String>,
+    username_cache_time: Instant,
     prev_cpu_total: CpuStats,
     prev_cpus: Vec<CpuStats>,
     prev_proc_times: HashMap<u32, u64>,
@@ -53,14 +64,25 @@ impl Collector {
         // processes already running before tracepoints were attached.
         loader::seed_cmdlines_from_proc(&mut ebpf);
 
+        let mut system = SystemReader::new()
+            .inspect_err(|e| log::error!("system stats unavailable: {e:#}"))
+            .ok();
+
         // Seed CPU stats so the first real collect() gets a meaningful
         // delta instead of computing against zero (which would show
         // all CPUs at ~100%).
-        let (prev_cpu_total, prev_cpus) = read_cpu_stats().unwrap_or_default();
+        let (prev_cpu_total, prev_cpus) = system
+            .as_mut()
+            .and_then(|s| s.read_cpu_stats().ok())
+            .unwrap_or_default();
 
         Self {
             ebpf,
+            system,
             cgroup_resolver: CgroupResolver::new(),
+            cmdline_cache: HashMap::new(),
+            username_cache: HashMap::new(),
+            username_cache_time: Instant::now(),
             prev_cpu_total,
             prev_cpus,
             prev_proc_times: HashMap::new(),
@@ -79,7 +101,11 @@ impl Collector {
     pub fn noop() -> Self {
         Self {
             ebpf: EbpfLoader::noop(),
+            system: None,
             cgroup_resolver: CgroupResolver::new(),
+            cmdline_cache: HashMap::new(),
+            username_cache: HashMap::new(),
+            username_cache_time: Instant::now(),
             prev_cpu_total: CpuStats::default(),
             prev_cpus: Vec::new(),
             prev_proc_times: HashMap::new(),
@@ -105,10 +131,14 @@ impl Collector {
 
         // System-wide stats from /proc (unchanged — these are the kernel's
         // official API for aggregate stats)
-        let (mut cpu_total, mut cpus) = read_cpu_stats()?;
-        let (memory, swap) = read_memory_info()?;
-        let load_avg = read_load_avg()?;
-        let uptime = read_uptime()?;
+        let system = self
+            .system
+            .as_mut()
+            .ok_or_else(|| anyhow::anyhow!("system stats unavailable"))?;
+        let (mut cpu_total, mut cpus) = system.read_cpu_stats()?;
+        let (memory, swap) = system.read_memory_info()?;
+        let load_avg = system.read_load_avg()?;
+        let uptime = system.read_uptime()?;
 
         // Calculate CPU percentages from deltas
         cpu_total.calc_percentages(&self.prev_cpu_total);
@@ -120,34 +150,49 @@ impl Collector {
 
         lap(&mut timings.system_stats);
 
-        // Refresh cgroup inode map periodically (once per cycle, not per-process)
-        self.cgroup_resolver.tick();
-        lap(&mut timings.cgroup_tick);
-
         // Process data from BPF task iterator (replaces all /proc/{pid} reads)
         // If BPF isn't loaded or read fails, return empty process list
         // but still return valid system stats.
-        let bpf_tasks = match self.ebpf.read_tasks() {
-            Ok(tasks) => tasks,
+        let records = match self.ebpf.read_tasks() {
+            Ok(records) => records,
             Err(e) => {
                 log::debug!("BPF read_tasks failed: {e}");
-                Vec::new()
+                Default::default()
             }
         };
+        let bpf_tasks = &records.tasks;
+        // Network counters were sampled during the iterator walk.
+        let net_now = Instant::now();
+        let net_wall_delta_secs = net_now
+            .duration_since(self.prev_net_time)
+            .as_secs_f64()
+            .max(0.1);
         lap(&mut timings.bpf_iter);
 
-        // Classify tasks: processes, user threads, kernel threads
+        // Re-walk cgroupfs only if some task is in a cgroup we haven't seen.
+        self.cgroup_resolver
+            .ensure_known(bpf_tasks.iter().map(|t| t.cgroup_id));
+        lap(&mut timings.cgroup_tick);
+
+        if self.username_cache_time.elapsed() >= USERNAME_TTL {
+            self.username_cache.clear();
+            self.username_cache_time = Instant::now();
+        }
+        let mut cmdline_cache = HashMap::with_capacity(self.cmdline_cache.len());
+        let mut new_net_bytes = HashMap::new();
+
+        // Classify tasks: processes, user threads, kernel threads. The
+        // iterator emits only thread-group leaders, with their thread count.
         let mut task_count = 0u32;
         let mut user_threads = 0u32;
         let mut kernel_threads = 0u32;
-        for task in &bpf_tasks {
+        for task in bpf_tasks {
             let is_kthread = task.ppid == 2 || task.pid == 2;
             if is_kthread {
-                kernel_threads += 1;
-            } else if task.tid != task.pid {
-                user_threads += 1;
+                kernel_threads += task.nr_threads.max(1);
             } else {
                 task_count += 1;
+                user_threads += task.nr_threads.saturating_sub(1);
             }
         }
 
@@ -155,21 +200,12 @@ impl Collector {
         let mut running = 0u32;
         let mut sleeping = 0u32;
 
-        // Cache frozen state per unique cgroup to avoid redundant reads
-        let mut frozen_cache = HashMap::<String, bool>::new();
-
         // Total CPU ticks delta for percentage calculation
         let total_sys_delta = cpu_total
             .total_ticks()
             .saturating_sub(self.prev_cpu_total.total_ticks());
 
-        for task in &bpf_tasks {
-            // Skip kernel threads with tid != tgid (they're threads, not processes)
-            // But keep the thread group leader
-            if task.tid != task.pid {
-                continue;
-            }
-
+        for task in bpf_tasks {
             let state = ProcessState::from_kernel_state(task.state);
             match state {
                 ProcessState::Running => running += 1,
@@ -177,8 +213,11 @@ impl Collector {
                 _ => {}
             }
 
-            // CPU time: BPF gives nanoseconds; convert to ticks equivalent for delta
-            let total_cpu_ns = task.utime_ns + task.stime_ns;
+            // CPU time: BPF gives nanoseconds; convert to ticks equivalent for delta.
+            // Whole thread group: leader + exited threads + live threads.
+            let total_cpu_ns = task.utime_ns
+                + task.stime_ns
+                + records.thread_cpu_ns.get(&task.pid).copied().unwrap_or(0);
             let prev_cpu_ns = self
                 .prev_proc_times
                 .get(&task.pid)
@@ -218,25 +257,60 @@ impl Collector {
             let nice = task.static_prio - 120;
             let priority = task.prio - 100;
 
-            let user = resolve_username(task.ruid);
+            let user = self
+                .username_cache
+                .entry(task.ruid)
+                .or_insert_with(|| resolve_username(task.ruid))
+                .clone();
 
             let is_kernel_thread = task.ppid == 2 || task.pid == 2;
 
-            // cmdline: prefer BPF CMDLINE_MAP, fall back to comm
+            // cmdline: prefer BPF CMDLINE_MAP, fall back to comm. Only hit
+            // the map when the entry's generation differs from the cached one.
             let comm = comm_to_string(&task.comm);
-            let cmdline = self
-                .ebpf
-                .get_cmdline(task.pid)
-                .unwrap_or_else(|| format!("[{}]", comm));
+            let cached = self
+                .cmdline_cache
+                .remove(&task.pid)
+                .filter(|(gen, _)| *gen == task.cmdline_gen);
+            let fetched = match cached {
+                Some(entry) => Some(entry),
+                None if task.cmdline_gen != 0 => self.ebpf.get_cmdline(task.pid),
+                None => None,
+            };
+            let cmdline = match fetched {
+                Some((gen, cmdline)) => {
+                    cmdline_cache.insert(task.pid, (gen, cmdline.clone()));
+                    cmdline
+                }
+                None => format!("[{}]", comm),
+            };
 
             // Container: resolve from cgroup_id
             let cgroup_path = self.cgroup_resolver.resolve_path(task.cgroup_id);
             let container = self.cgroup_resolver.resolve(task.cgroup_id);
 
-            // Check frozen state (cached per cgroup)
-            let frozen = *frozen_cache
-                .entry(cgroup_path.clone())
-                .or_insert_with(|| cgroup_control::is_frozen(&cgroup_path));
+            // Network: cumulative bytes from NET_STATS, joined in by the iterator
+            let (mut net_rate, mut net_ifname) = (0.0, String::new());
+            let net_total = task.net_tx_bytes + task.net_rx_bytes;
+            if net_total > 0 || task.net_ifindex > 0 {
+                let prev_total = self.prev_net_bytes.get(&task.pid).copied().unwrap_or(net_total);
+                net_rate = net_total.saturating_sub(prev_total) as f64 / net_wall_delta_secs;
+                new_net_bytes.insert(task.pid, net_total);
+
+                net_ifname = if task.net_ifindex > 0 {
+                    let ifindex = task.net_ifindex;
+                    self.ifindex_cache
+                        .entry(ifindex)
+                        .or_insert_with(|| {
+                            nix::net::if_::if_indextoname(ifindex)
+                                .map(|s| s.to_string_lossy().into_owned())
+                                .unwrap_or_else(|_| format!("if{ifindex}"))
+                        })
+                        .clone()
+                } else {
+                    "*".to_string()
+                };
+            }
 
             processes.push(ProcessInfo {
                 pid: task.pid,
@@ -253,10 +327,10 @@ impl Collector {
                 mem_percent,
                 gpu_percent: 0.0,
                 gpu_mem_bytes: 0,
-                net_rx_bytes: 0,
-                net_tx_bytes: 0,
-                net_rate: 0.0,
-                net_ifname: String::new(),
+                net_rx_bytes: task.net_rx_bytes,
+                net_tx_bytes: task.net_tx_bytes,
+                net_rate,
+                net_ifname,
                 cpu_time_secs,
                 start_time_ns: task.start_time_ns,
                 comm,
@@ -270,11 +344,12 @@ impl Collector {
                 is_thread: false,
                 tid: task.pid,
                 tagged: false,
-                frozen,
+                frozen: task.frozen != 0,
                 tree_prefix: String::new(),
             });
         }
 
+        self.cmdline_cache = cmdline_cache;
         lap(&mut timings.per_process);
 
         // GPU data
@@ -292,35 +367,6 @@ impl Collector {
         }
 
         lap(&mut timings.gpu);
-
-        // Network data from BPF kprobes
-        let net_stats = self.ebpf.read_net_stats();
-        let now = Instant::now();
-        let wall_delta_secs = now.duration_since(self.prev_net_time).as_secs_f64().max(0.1);
-        let mut new_net_bytes = HashMap::new();
-        for proc in &mut processes {
-            if let Some(&(tx, rx, ifindex)) = net_stats.get(&proc.pid) {
-                proc.net_tx_bytes = tx;
-                proc.net_rx_bytes = rx;
-                let total = tx + rx;
-                let prev_total = self.prev_net_bytes.get(&proc.pid).copied().unwrap_or(total);
-                let delta = total.saturating_sub(prev_total);
-                proc.net_rate = delta as f64 / wall_delta_secs;
-                new_net_bytes.insert(proc.pid, total);
-
-                // Resolve interface name
-                if ifindex > 0 {
-                    let ifname = self.ifindex_cache.entry(ifindex).or_insert_with(|| {
-                        nix::net::if_::if_indextoname(ifindex)
-                            .map(|s| s.to_string_lossy().into_owned())
-                            .unwrap_or_else(|_| format!("if{ifindex}"))
-                    });
-                    proc.net_ifname = ifname.clone();
-                } else {
-                    proc.net_ifname = "*".to_string();
-                }
-            }
-        }
 
         lap(&mut timings.net);
 
@@ -351,7 +397,7 @@ impl Collector {
             .map(|p| (p.pid, p.prev_cpu_ns))
             .collect();
         self.prev_net_bytes = new_net_bytes;
-        self.prev_net_time = now;
+        self.prev_net_time = net_now;
         lap(&mut timings.tree);
         self.last_timings = timings;
 

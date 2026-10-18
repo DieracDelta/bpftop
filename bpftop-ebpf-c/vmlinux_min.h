@@ -16,6 +16,11 @@ typedef unsigned int __be32;
 typedef unsigned int __wsum;
 
 typedef s32 pid_t;
+typedef _Bool bool;
+
+typedef struct {
+	int counter;
+} atomic_t;
 
 #ifndef BPF_NO_PRESERVE_ACCESS_INDEX
 #pragma clang attribute push(__attribute__((preserve_access_index)), apply_to = record)
@@ -48,12 +53,24 @@ struct kernfs_node {
 	u64 id;
 };
 
+struct cgroup_freezer_state {
+	bool freeze;
+};
+
 struct cgroup {
 	struct kernfs_node *kn;
+	struct cgroup_freezer_state freezer;
 };
 
 struct css_set {
 	struct cgroup *dfl_cgrp;
+};
+
+struct signal_struct {
+	atomic_t live;
+	int nr_threads;
+	u64 utime;
+	u64 stime;
 };
 
 struct task_struct {
@@ -70,6 +87,7 @@ struct task_struct {
 	const struct cred *cred;
 	char comm[16];
 	struct css_set *cgroups;
+	struct signal_struct *signal;
 };
 
 struct net_device {

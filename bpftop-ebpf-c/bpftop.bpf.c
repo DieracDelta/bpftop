@@ -33,13 +33,36 @@ struct task_info {
 	s32 static_prio;
 	u64 shmem_pages;
 	u64 cgroup_id;
+	u64 cmdline_gen;
+	u64 net_tx_bytes;
+	u64 net_rx_bytes;
+	u32 net_ifindex;
+	u32 nr_threads;
+	u8 frozen;
+	u8 _pad2[7];
+};
+
+/* Emitted for non-leader threads, so userspace can sum a process's CPU
+ * time across its live threads. tid != pid distinguishes it from a
+ * task_info record (whose tid == pid) in the iterator stream. */
+struct thread_cpu {
+	u32 pid;
+	u32 tid;
+	u64 cpu_ns;
 };
 
 struct cmdline_event {
 	u32 pid;
 	u32 len;
 	u8 cmdline[256];
+	/* Changes on every exec; lets userspace refetch only changed cmdlines. */
+	u64 gen;
 };
+
+/* Keep in sync with bpftop-common/src/lib.rs (asserted on both sides). */
+_Static_assert(sizeof(struct task_info) == 144, "task_info ABI");
+_Static_assert(sizeof(struct cmdline_event) == 272, "cmdline_event ABI");
+_Static_assert(sizeof(struct thread_cpu) == 16, "thread_cpu ABI");
 
 struct net_stats {
 	u64 tx_bytes;
@@ -69,21 +92,24 @@ struct {
 	__type(value, u64);
 } RECV_SOCK_STASH SEC(".maps");
 
-static __always_inline u64 read_cgroup_id(struct task_struct *task)
+static __always_inline void read_cgroup(struct task_struct *task, struct task_info *info)
 {
 	struct css_set *css = BPF_CORE_READ(task, cgroups);
 	if (!css)
-		return 0;
+		return;
 
 	struct cgroup *cgrp = BPF_CORE_READ(css, dfl_cgrp);
 	if (!cgrp)
-		return 0;
+		return;
+
+	/* Same value userspace would read from <cgroup>/cgroup.freeze. */
+	info->frozen = BPF_CORE_READ(cgrp, freezer.freeze);
 
 	struct kernfs_node *kn = BPF_CORE_READ(cgrp, kn);
 	if (!kn)
-		return 0;
+		return;
 
-	return BPF_CORE_READ(kn, id);
+	info->cgroup_id = BPF_CORE_READ(kn, id);
 }
 
 SEC("iter/task")
@@ -97,6 +123,21 @@ int dump_task(struct bpf_iter__task *ctx)
 	info.pid = (u32)BPF_CORE_READ(task, tgid);
 	info.tid = (u32)BPF_CORE_READ(task, pid);
 
+	/* Full records for thread-group leaders only; other threads just
+	 * contribute their CPU time. */
+	if (info.tid != info.pid) {
+		struct thread_cpu tc = {
+			.pid = info.pid,
+			.tid = info.tid,
+			.cpu_ns = BPF_CORE_READ(task, utime) + BPF_CORE_READ(task, stime),
+		};
+		bpf_seq_write(ctx->meta->seq, &tc, sizeof(tc));
+		return 0;
+	}
+
+	struct signal_struct *sig = BPF_CORE_READ(task, signal);
+	info.nr_threads = BPF_CORE_READ(sig, nr_threads);
+
 	struct task_struct *parent = BPF_CORE_READ(task, real_parent);
 	if (parent)
 		info.ppid = (u32)BPF_CORE_READ(parent, tgid);
@@ -108,8 +149,10 @@ int dump_task(struct bpf_iter__task *ctx)
 	}
 
 	info.state = (u8)BPF_CORE_READ(task, __state);
-	info.utime_ns = BPF_CORE_READ(task, utime);
-	info.stime_ns = BPF_CORE_READ(task, stime);
+	/* Leader's own time plus that of already-exited threads, which the
+	 * kernel folds into signal_struct. Live threads arrive as thread_cpu. */
+	info.utime_ns = BPF_CORE_READ(task, utime) + BPF_CORE_READ(sig, utime);
+	info.stime_ns = BPF_CORE_READ(task, stime) + BPF_CORE_READ(sig, stime);
 	info.prio = BPF_CORE_READ(task, prio);
 	info.static_prio = BPF_CORE_READ(task, static_prio);
 
@@ -128,7 +171,20 @@ int dump_task(struct bpf_iter__task *ctx)
 
 	info.start_time_ns = BPF_CORE_READ(task, start_time);
 	BPF_CORE_READ_INTO(&info.comm, task, comm);
-	info.cgroup_id = read_cgroup_id(task);
+	read_cgroup(task, &info);
+
+	/* Join the per-process maps here so userspace needs no per-PID
+	 * map syscalls in the steady state. */
+	struct cmdline_event *ev = bpf_map_lookup_elem(&CMDLINE_MAP, &info.pid);
+	if (ev)
+		info.cmdline_gen = ev->gen;
+
+	struct net_stats *net = bpf_map_lookup_elem(&NET_STATS, &info.pid);
+	if (net) {
+		info.net_tx_bytes = net->tx_bytes;
+		info.net_rx_bytes = net->rx_bytes;
+		info.net_ifindex = net->ifindex;
+	}
 
 	bpf_seq_write(ctx->meta->seq, &info, sizeof(info));
 	return 0;
@@ -152,6 +208,7 @@ int capture_cmdline(void *ctx)
 
 	struct cmdline_event event = {};
 	event.pid = pid;
+	event.gen = bpf_ktime_get_ns();
 
 	u64 len = arg_end - arg_start;
 	if (len > 255)
@@ -169,6 +226,13 @@ SEC("tracepoint/sched/sched_process_exit")
 int cleanup_cmdline(void *ctx)
 {
 	u32 pid = bpf_get_current_pid_tgid() >> 32;
+	struct task_struct *task = (struct task_struct *)bpf_get_current_task();
+
+	/* Fires for every exiting thread. Only drop per-process state once
+	 * the whole group is dead (signal->live is decremented before this
+	 * tracepoint), otherwise any thread exit loses the cmdline. */
+	if (BPF_CORE_READ(task, signal, live.counter) != 0)
+		return 0;
 
 	bpf_map_delete_elem(&CMDLINE_MAP, &pid);
 	bpf_map_delete_elem(&NET_STATS, &pid);

@@ -1,7 +1,8 @@
 use std::collections::HashMap;
 use std::fs;
-use std::os::unix::fs::MetadataExt;
+use std::os::unix::fs::{DirEntryExt, MetadataExt};
 use std::path::Path;
+use std::time::{Duration, Instant};
 
 /// Container runtime information for a process.
 #[derive(Debug, Clone)]
@@ -33,20 +34,24 @@ pub enum ServiceDisplayMode {
 
 const UNIT_SUFFIXES: &[&str] = &[".service", ".scope", ".slice", ".timer", ".socket"];
 
+/// Minimum time between cgroupfs walks triggered by unknown cgroup IDs.
+const MIN_REFRESH_INTERVAL: Duration = Duration::from_secs(2);
+
 /// Resolves cgroup inode IDs to container names.
 ///
 /// BPF provides `cgroup_id` (the inode number of the cgroup directory
 /// in cgroupfs). We walk /sys/fs/cgroup/ to build a mapping from
 /// inode ID → cgroup path, then parse container info from the path.
 ///
-/// No per-PID /proc reads are needed.
+/// Cgroup IDs are never reused and cgroup v2 directories can't be
+/// renamed, so a mapping stays valid for the cgroup's lifetime. The tree
+/// is only re-walked when a task shows up in a cgroup we haven't seen.
 pub struct CgroupResolver {
     /// cgroup inode ID → cgroup path (e.g. "/system.slice/docker-abc.scope")
     id_to_path: HashMap<u64, String>,
     /// cgroup path → parsed container info (cache)
     path_to_container: HashMap<String, Option<ContainerInfo>>,
-    /// Counter to trigger periodic refresh of the inode map.
-    cycles_since_refresh: u32,
+    last_refresh: Instant,
 }
 
 impl CgroupResolver {
@@ -54,18 +59,21 @@ impl CgroupResolver {
         let mut resolver = Self {
             id_to_path: HashMap::new(),
             path_to_container: HashMap::new(),
-            cycles_since_refresh: 0,
+            last_refresh: Instant::now(),
         };
         resolver.refresh_inode_map();
         resolver
     }
 
-    /// Call once per collect cycle to periodically refresh the cgroup inode map.
-    pub fn tick(&mut self) {
-        self.cycles_since_refresh += 1;
-        if self.cycles_since_refresh >= 10 {
+    /// Call once per collect cycle with every task's cgroup ID. Re-walks
+    /// cgroupfs if any ID is unknown, rate-limited so IDs that never
+    /// resolve (e.g. a foreign cgroup namespace) don't cause a walk per cycle.
+    pub fn ensure_known(&mut self, mut ids: impl Iterator<Item = u64>) {
+        if self.last_refresh.elapsed() < MIN_REFRESH_INTERVAL {
+            return;
+        }
+        if ids.any(|id| id != 0 && !self.id_to_path.contains_key(&id)) {
             self.refresh_inode_map();
-            self.cycles_since_refresh = 0;
         }
     }
 
@@ -98,37 +106,31 @@ impl CgroupResolver {
     /// Walk /sys/fs/cgroup/ and map inode numbers to cgroup paths.
     fn refresh_inode_map(&mut self) {
         self.id_to_path.clear();
+        self.last_refresh = Instant::now();
         let base = Path::new("/sys/fs/cgroup");
-        if base.exists() {
-            self.walk_cgroup_tree(base, base);
+        if let Ok(meta) = fs::metadata(base) {
+            self.id_to_path.insert(meta.ino(), "/".to_string());
+            self.walk_cgroup_tree(base, "");
         }
     }
 
-    fn walk_cgroup_tree(&mut self, dir: &Path, base: &Path) {
+    /// Uses d_type and d_ino from getdents, so the walk costs one
+    /// open/getdents/close per cgroup and no stat calls. (kernfs reports
+    /// the node ID as the inode number on 64-bit.)
+    fn walk_cgroup_tree(&mut self, dir: &Path, rel: &str) {
         let entries = match fs::read_dir(dir) {
             Ok(e) => e,
             Err(_) => return,
         };
 
-        // Record this directory's inode
-        if let Ok(meta) = fs::metadata(dir) {
-            let ino = meta.ino();
-            let relative = dir
-                .strip_prefix(base)
-                .map(|p| format!("/{}", p.display()))
-                .unwrap_or_else(|_| "/".to_string());
-            self.id_to_path.insert(ino, relative);
-        }
-
-        for entry in entries {
-            let entry = match entry {
-                Ok(e) => e,
-                Err(_) => continue,
-            };
-            let path = entry.path();
-            if path.is_dir() {
-                self.walk_cgroup_tree(&path, base);
+        for entry in entries.flatten() {
+            if !entry.file_type().is_ok_and(|t| t.is_dir()) {
+                continue;
             }
+            let name = entry.file_name();
+            let child_rel = format!("{rel}/{}", name.to_string_lossy());
+            self.id_to_path.insert(entry.ino(), child_rel.clone());
+            self.walk_cgroup_tree(&entry.path(), &child_rel);
         }
     }
 }
