@@ -52,8 +52,8 @@ struct Cli {
     #[arg(long, default_value_t = 0)]
     interval_ms: u64,
 
-    /// Print the last cycle's processes as TSV instead of timing results:
-    /// pid, user, frozen, net_tx, net_rx, net_if, cpu_percent, cmdline
+    /// Print the last cycle's processes as TSV (with a header row) instead
+    /// of timing results
     #[arg(long)]
     dump: bool,
 
@@ -160,16 +160,26 @@ fn main() -> Result<()> {
     }
 
     if cli.dump {
+        println!("pid\tppid\tuser\tstate\tthread\tkthread\tfrozen\tcpu\tnet_tx\tnet_rx\tnet_if\tio_read\tio_write\tiops\tcontainer\tcomm\tcmdline");
         for p in &last_procs {
             println!(
-                "{}\t{}\t{}\t{}\t{}\t{}\t{:.1}\t{}",
+                "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{:.1}\t{}\t{}\t{}\t{:.0}\t{:.0}\t{:.0}\t{}\t{}\t{}",
                 p.pid,
+                p.ppid,
                 p.user,
+                p.state.as_char(),
+                p.is_thread as u8,
+                p.is_kernel_thread as u8,
                 p.frozen as u8,
+                p.cpu_percent,
                 p.net_tx_bytes,
                 p.net_rx_bytes,
                 p.net_ifname,
-                p.cpu_percent,
+                p.io_read_rate,
+                p.io_write_rate,
+                p.iops,
+                p.container.as_deref().unwrap_or("-"),
+                p.comm,
                 p.cmdline
             );
         }

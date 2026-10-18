@@ -229,37 +229,96 @@
                 " s.sendto(b\"x\"*100,r6.getsockname()); r6.recv(200)\n"
                 " s.sendto(b\"y\"*100,m); r4.recv(200); time.sleep(0.2)'"
             )
+            # Storage writes (fsync'd) and write syscalls from one process.
+            machine.succeed(
+                "systemd-run --unit=diskio ${pkgs.python3}/bin/python3 -c "
+                "'#marker-diskio\n"
+                "import os,time\n"
+                "f=os.open(\"/var/tmp/bpftop-io\",os.O_WRONLY|os.O_CREAT)\n"
+                "while True:\n"
+                " os.pwrite(f,b\"x\"*65536,0); os.fsync(f); time.sleep(0.05)'"
+            )
+            # Process states: a stopped process and an unreaped (zombie) child.
+            machine.succeed("systemd-run --unit=stopme ${pkgs.coreutils}/bin/sleep 100003")
+            machine.succeed(
+                "systemd-run --unit=zombieparent ${pkgs.python3}/bin/python3 -c "
+                "'import os,time\n"
+                "os.fork() or os._exit(0)\n"
+                "time.sleep(1e9)' marker-zombieparent"
+            )
+            # Longer than a CMDLINE_MAP entry (255 bytes); seeded from /proc.
+            machine.succeed(
+                "systemd-run --unit=longcmd ${pkgs.python3}/bin/python3 -c \"import time; time.sleep(1e9)\" "
+                + "a" * 300 + " marker-longseed"
+            )
             machine.succeed("systemd-run --unit=freezeme ${pkgs.coreutils}/bin/sleep 100001")
-            machine.wait_until_succeeds("systemctl is-active freezeme threadexit udp6")
+            machine.wait_until_succeeds("systemctl is-active freezeme threadexit udp6 diskio stopme zombieparent longcmd")
+            machine.succeed("systemctl kill --signal=STOP stopme")
             machine.succeed("echo 1 > /sys/fs/cgroup/system.slice/freezeme.service/cgroup.freeze")
-            # Execs after BPF loads (during --settle-ms): cmdline comes from the exec tracepoint.
-            machine.succeed("systemd-run --unit=execer ${pkgs.bash}/bin/bash -c '${pkgs.coreutils}/bin/sleep 10; exec ${pkgs.python3}/bin/python3 -c \"import time; time.sleep(1e9)\" marker-exec'")
+            # Execs after BPF loads (during --settle-ms): cmdline comes from the
+            # exec tracepoint, and is also longer than a map entry.
+            machine.succeed(
+                "systemd-run --unit=execer ${pkgs.bash}/bin/bash -c '${pkgs.coreutils}/bin/sleep 10; "
+                "exec ${pkgs.python3}/bin/python3 -c \"import time; time.sleep(1e9)\" " + "b" * 300 + " marker-exec'"
+            )
             dump = machine.succeed("bench --dump --settle-ms 15000 --warmup 1 --iterations 1 --interval-ms 1000 | tee /tmp/results/dump.tsv")
             def parse(dump):
-                return [l.split("\t", 7) for l in dump.splitlines() if l.count("\t") >= 7]
+                lines = dump.splitlines()
+                header = lines[0].split("\t")
+                n = len(header) - 1
+                return [dict(zip(header, l.split("\t", n))) for l in lines[1:] if l.count("\t") >= n]
             def find(rows, marker):
-                hits = [r for r in rows if marker in r[7]]
+                hits = [r for r in rows if marker in r["cmdline"] and r["thread"] == "0"]
                 assert hits, f"no process with cmdline containing {marker!r}"
                 return hits[0]
             def check_net(rows, mode):
                 r = find(rows, "marker-threadexit")
-                assert int(r[3]) > 0 and int(r[4]) > 0 and r[5] == "lo", f"net ({mode}): {r}"
+                assert int(r["net_tx"]) > 0 and int(r["net_rx"]) > 0 and r["net_if"] == "lo", f"net ({mode}): {r}"
                 r = find(rows, "marker-udp6")
-                tx, rx = int(r[3]), int(r[4])
+                tx, rx = int(r["net_tx"]), int(r["net_rx"])
                 assert tx >= 1000 and abs(tx - rx) <= 200, f"udp6 ({mode}): {r}"
             rows = parse(dump)
-            r = find(rows, "marker-threadexit")
-            assert r[1] == "bench3", f"user: {r}"
+            assert find(rows, "marker-threadexit")["user"] == "bench3"
             check_net(rows, "fexit")
-            assert find(rows, "sleep 100001")[2] == "1", "freezeme should be frozen"
-            assert find(rows, "marker-exec")[2] == "0"
+            assert find(rows, "sleep 100001")["frozen"] == "1", "freezeme should be frozen"
+            assert sum(r["frozen"] == "1" for r in rows) == 1, "only freezeme is frozen"
             # CPU% must include non-leader threads (was leader-only).
-            assert float(find(rows, "marker-busythread")[6]) > 50, find(rows, "marker-busythread")
-            assert sum(r[2] == "1" for r in rows) == 1, "only freezeme is frozen"
+            r = find(rows, "marker-busythread")
+            assert float(r["cpu"]) > 50 and r["kthread"] == "0", r
+            # Full cmdlines past the 255-byte map entry, seeded and exec'd.
+            assert find(rows, "marker-longseed")["cmdline"].endswith("a" * 300 + " marker-longseed")
+            r = find(rows, "marker-exec")
+            assert ("b" * 300) in r["cmdline"] and r["frozen"] == "0", r
+            # Process states, decoded like the kernel's /proc.
+            assert find(rows, "sleep 100003")["state"] == "T", find(rows, "sleep 100003")
+            parent = find(rows, "marker-zombieparent")
+            zombies = [r for r in rows if r["ppid"] == parent["pid"]]
+            assert [z["state"] for z in zombies] == ["Z"], zombies
+            unknown = [r for r in rows if r["state"] == "?"]
+            assert not unknown, unknown
+            kthreads = [r for r in rows if r["kthread"] == "1"]
+            assert any(r["comm"] == "kthreadd" for r in kthreads), "kthreadd should be a kthread"
+            assert any(r["state"] == "I" for r in kthreads), "idle kworkers should be I"
+            # Disk I/O columns.
+            r = find(rows, "marker-diskio")
+            assert float(r["io_write"]) > 0 and float(r["iops"]) > 0, r
+            # Thread rows (H): each python pool lists its 100 threads, and the
+            # busy worker thread carries its own CPU.
+            tdump = machine.succeed("bench --dump --threads --warmup 1 --iterations 1 --interval-ms 1000 | tee /tmp/results/dump_threads.tsv")
+            trows = parse(tdump)
+            busy = find(trows, "marker-busythread")
+            workers = [r for r in trows if r["thread"] == "1" and r["ppid"] == busy["pid"]]
+            assert len(workers) == 1 and float(workers[0]["cpu"]) > 50, workers
+            pools = [r for r in trows if r["thread"] == "0" and "range(100)" in r["cmdline"]]
+            assert len(pools) == 10, len(pools)
+            for p in pools:
+                n = sum(1 for r in trows if r["thread"] == "1" and r["ppid"] == p["pid"])
+                assert n == 100, (p["pid"], n)
             # Same accounting through the kprobe fallback.
             kdump = machine.succeed("BPFTOP_NET_PROBES=kprobe bench --dump --settle-ms 5000 --warmup 0 --iterations 1 | tee /tmp/results/dump_kprobe.tsv")
             check_net(parse(kdump), "kprobe")
             machine.succeed("echo 0 > /sys/fs/cgroup/system.slice/freezeme.service/cgroup.freeze")
+            machine.succeed("systemctl kill --signal=CONT stopme")
 
             # ── Network probe overhead on other processes ────────────
             def netbench(tag):
