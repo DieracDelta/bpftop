@@ -421,16 +421,14 @@ impl App {
                     frame.render_widget(kill, area);
                 }
             }
-            AppMode::Freeze => {
-                if !self.freeze_targets.is_empty() {
-                    let dialog = FreezeDialog {
-                        targets: &self.freeze_targets,
-                        is_thaw: self.freeze_is_thaw,
-                        scroll: self.freeze_scroll,
-                        theme: &self.theme,
-                    };
-                    frame.render_widget(dialog, area);
-                }
+            AppMode::Freeze if !self.freeze_targets.is_empty() => {
+                let dialog = FreezeDialog {
+                    targets: &self.freeze_targets,
+                    is_thaw: self.freeze_is_thaw,
+                    scroll: self.freeze_scroll,
+                    theme: &self.theme,
+                };
+                frame.render_widget(dialog, area);
             }
             _ => {}
         }

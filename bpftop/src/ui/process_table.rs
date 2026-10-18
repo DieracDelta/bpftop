@@ -67,14 +67,9 @@ impl<'a> Widget for ProcessTableWidget<'a> {
                     .fg(self.theme.proc_zombie)
                     .add_modifier(Modifier::BOLD);
                 let normal_style = Style::default().fg(self.theme.fg);
-                let mut y = rows_area.y + 1;
-                for line in msg.lines() {
-                    if y >= rows_area.y + rows_area.height {
-                        break;
-                    }
+                for (y, line) in (rows_area.y + 1..rows_area.y + rows_area.height).zip(msg.lines()) {
                     let style = if y == rows_area.y + 1 { err_style } else { normal_style };
                     buf.set_string(rows_area.x + 2, y, line, style);
-                    y += 1;
                 }
                 return;
             }
@@ -301,12 +296,14 @@ impl<'a> ProcessTableWidget<'a> {
         column_layout(
             total_width,
             self.processes,
-            self.show_container,
-            self.show_service,
-            self.service_display_mode,
-            self.show_gpu,
-            self.show_net,
-            self.show_io,
+            ColumnToggles {
+                container: self.show_container,
+                service: self.show_service,
+                service_display_mode: self.service_display_mode,
+                gpu: self.show_gpu,
+                net: self.show_net,
+                io: self.show_io,
+            },
         )
     }
 }
@@ -314,23 +311,29 @@ impl<'a> ProcessTableWidget<'a> {
 /// Compute the column layout: which columns are visible and their widths.
 ///
 /// This is extracted so that `input.rs` can resolve mouse clicks to columns.
+/// Which optional column groups are visible.
+pub struct ColumnToggles {
+    pub container: bool,
+    pub service: bool,
+    pub service_display_mode: ServiceDisplayMode,
+    pub gpu: bool,
+    pub net: bool,
+    pub io: bool,
+}
+
 pub fn column_layout(
     total_width: u16,
     processes: &[ProcessInfo],
-    show_container: bool,
-    show_service: bool,
-    service_display_mode: ServiceDisplayMode,
-    show_gpu: bool,
-    show_net: bool,
-    show_io: bool,
+    show: ColumnToggles,
 ) -> Vec<(SortColumn, u16)> {
+    let service_display_mode = show.service_display_mode;
     let mut cols: Vec<(SortColumn, u16)> = SortColumn::all()
         .iter()
-        .filter(|c| **c != SortColumn::Container || show_container)
-        .filter(|c| **c != SortColumn::Service || show_service)
-        .filter(|c| (**c != SortColumn::GpuPercent && **c != SortColumn::GpuMem) || show_gpu)
-        .filter(|c| !matches!(**c, SortColumn::NetRate | SortColumn::NetTotal | SortColumn::NetIf) || show_net)
-        .filter(|c| !matches!(**c, SortColumn::IoRead | SortColumn::IoWrite | SortColumn::Iops) || show_io)
+        .filter(|c| **c != SortColumn::Container || show.container)
+        .filter(|c| **c != SortColumn::Service || show.service)
+        .filter(|c| (**c != SortColumn::GpuPercent && **c != SortColumn::GpuMem) || show.gpu)
+        .filter(|c| !matches!(**c, SortColumn::NetRate | SortColumn::NetTotal | SortColumn::NetIf) || show.net)
+        .filter(|c| !matches!(**c, SortColumn::IoRead | SortColumn::IoWrite | SortColumn::Iops) || show.io)
         .map(|c| (*c, c.width()))
         .collect();
 

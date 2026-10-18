@@ -509,7 +509,7 @@ mod tests {
     #[test]
     fn quantized_sort_stability() {
         // Processes with CPU% that all display as "0.0" should sort by PID
-        let mut procs = vec![
+        let mut procs = [
             make_proc(300, 0.04),
             make_proc(100, 0.02),
             make_proc(200, 0.01),
@@ -533,7 +533,7 @@ mod tests {
     #[test]
     fn quantized_sort_distinguishes_different_values() {
         // Processes with clearly different CPU% should still sort correctly
-        let mut procs = vec![
+        let mut procs = [
             make_proc(1, 0.5),
             make_proc(2, 5.0),
             make_proc(3, 1.2),

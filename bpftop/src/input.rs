@@ -296,16 +296,8 @@ fn handle_normal_key(app: &mut App, key: KeyEvent) -> bool {
         }
 
         // Tree collapse/expand
-        KeyCode::Char('+') | KeyCode::Char('=') => {
-            if app.tree_view {
-                app.expand_tree_node();
-            }
-        }
-        KeyCode::Char('-') => {
-            if app.tree_view {
-                app.collapse_tree_node();
-            }
-        }
+        KeyCode::Char('+') | KeyCode::Char('=') if app.tree_view => app.expand_tree_node(),
+        KeyCode::Char('-') if app.tree_view => app.collapse_tree_node(),
 
         _ => {}
     }
@@ -556,16 +548,18 @@ fn handle_mouse(app: &mut App, mouse: MouseEvent) {
                 // Click on column header → toggle sort
                 let has_container = app.filtered_processes.iter().any(|p| p.container.is_some());
                 let has_service = app.filtered_processes.iter().any(|p| p.service.is_some());
-                let has_gpu = app.show_gpu && app.sys_info.gpus.len() > 0;
+                let has_gpu = app.show_gpu && !app.sys_info.gpus.is_empty();
                 let layout = process_table::column_layout(
                     app.table_width,
                     &app.filtered_processes,
-                    has_container,
-                    has_service,
-                    app.service_display_mode,
-                    has_gpu,
-                    app.show_net,
-                    app.show_io,
+                    process_table::ColumnToggles {
+                        container: has_container,
+                        service: has_service,
+                        service_display_mode: app.service_display_mode,
+                        gpu: has_gpu,
+                        net: app.show_net,
+                        io: app.show_io,
+                    },
                 );
 
                 let mut x: u16 = 0;
