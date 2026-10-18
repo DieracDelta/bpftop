@@ -5,7 +5,7 @@
 //! counts and timings match what the TUI's background thread does.
 //!
 //! Run: sudo ./target/release/bench --iterations 50 --json
-//! Syscalls per cycle: compare `strace -fc` of `--iterations 1` vs `--iterations 21`.
+//! Syscalls per cycle: compare `strace -fc` of `--iterations 1` vs `--iterations N`.
 
 #[allow(dead_code)]
 #[path = "../data/mod.rs"]

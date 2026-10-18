@@ -36,7 +36,7 @@
             hash = "sha256-85fpj96ncyt/S9ybbIctkogrZ71k+Pl1wjrODFeeUHs=";
           };
 
-          mkBpftop = { pname, rustToolchain, cargoTarget ? null, extraNativeBuildInputs ? [], env ? {} }:
+          mkBpftop = { pname, rustToolchain, cargoTarget ? null, extraNativeBuildInputs ? [], env ? {}, bins ? [ "bpftop" ] }:
             let
               targetFlag = if cargoTarget != null then "--target ${cargoTarget}" else "";
               outputDir = if cargoTarget != null then "target/${cargoTarget}/release" else "target/release";
@@ -87,7 +87,7 @@
                   -o bpftop-ebpf-c/target/bpftop.bpf.o
 
                 # Phase 2: Build userspace (embeds eBPF via include_bytes_aligned!)
-                cargo build --release --bin bpftop ${targetFlag}
+                cargo build --release ${pkgs.lib.concatMapStringsSep " " (b: "--bin ${b}") bins} ${targetFlag}
 
                 runHook postBuild
               '';
@@ -95,7 +95,7 @@
               installPhase = ''
                 runHook preInstall
                 mkdir -p $out/bin
-                cp ${outputDir}/bpftop $out/bin/
+                cp ${pkgs.lib.concatMapStringsSep " " (b: "${outputDir}/${b}") bins} $out/bin/
                 runHook postInstall
               '';
             } // env);
@@ -119,6 +119,13 @@
             rustToolchain = rustNightly;
           };
 
+          # bpftop plus the headless collection benchmark.
+          bench = mkBpftop {
+            pname = "bpftop-bench";
+            rustToolchain = rustNightly;
+            bins = [ "bpftop" "bench" ];
+          };
+
           static = mkBpftop {
             pname = "bpftop-static";
             rustToolchain = pkgs.rust-bin.nightly.latest.default.override {
@@ -133,6 +140,58 @@
           };
         }
       );
+
+      # Root-in-a-VM collection benchmark: `nix build .#checks.x86_64-linux.bench-vm`
+      # Results (bench JSON + strace syscall counts) land in ./result/results.
+      checks = forAllSystems ({ pkgs, system }: {
+        bench-vm = pkgs.testers.runNixOSTest {
+          name = "bpftop-bench-vm";
+          nodes.machine = { pkgs, ... }: {
+            boot.kernelPackages = pkgs.linuxPackages_latest;
+            virtualisation.memorySize = 4096;
+            virtualisation.cores = 4;
+            users.users = builtins.listToAttrs (map (i: {
+              name = "bench${toString i}";
+              value = { isSystemUser = true; group = "nogroup"; };
+            }) (pkgs.lib.range 1 20));
+            environment.systemPackages = [
+              self.packages.${system}.bench
+              pkgs.strace
+              pkgs.python3
+            ];
+          };
+          testScript = ''
+            machine.wait_for_unit("multi-user.target")
+
+            # 40 units x 50 procs spread over 20 users. Half the procs touch
+            # UDP first so NET_STATS has entries, then exec into sleep (same pid).
+            for i in range(40):
+                net = "echo x > /dev/udp/127.0.0.1/9 2>/dev/null;" if i % 2 == 0 else ""
+                machine.succeed(
+                    f"systemd-run --unit=load{i} --uid=bench{i % 20 + 1} ${pkgs.bash}/bin/bash -c "
+                    f"'for j in {{1..50}}; do ${pkgs.bash}/bin/bash -c \"{net} exec ${pkgs.coreutils}/bin/sleep infinity\" & done; wait'"
+                )
+            # Multithreaded processes: 10 x 100 threads.
+            for i in range(10):
+                machine.succeed(
+                    f"systemd-run --unit=threads{i} ${pkgs.python3}/bin/python3 -c "
+                    "'import threading,time; [threading.Thread(target=time.sleep,args=(1e9,)).start() for _ in range(100)]; time.sleep(1e9)'"
+                )
+            machine.wait_until_succeeds("test $(ls -d /proc/[0-9]* | wc -l) -gt 2000", timeout=900)
+            machine.succeed("sleep 2")
+            print(machine.succeed("echo procs=$(ls -d /proc/[0-9]* | wc -l) tasks=$(ls -d /proc/[0-9]*/task/* | wc -l) cgroups=$(find /sys/fs/cgroup -type d | wc -l)"))
+
+            machine.succeed("mkdir -p /tmp/results")
+            machine.succeed("echo procs=$(ls -d /proc/[0-9]* | wc -l) tasks=$(ls -d /proc/[0-9]*/task/* | wc -l) cgroups=$(find /sys/fs/cgroup -type d | wc -l) > /tmp/results/workload.txt")
+            machine.succeed("bench --iterations 10 --warmup 2 --json > /tmp/results/bench.json")
+            # Syscalls per cycle = (6-cycle run - 1-cycle run) / 5.
+            machine.succeed("strace -f -c -S calls -o /tmp/results/strace_1.txt bench --iterations 1 --warmup 0")
+            machine.succeed("strace -f -c -S calls -o /tmp/results/strace_6.txt bench --iterations 6 --warmup 0")
+            print(machine.succeed("cat /tmp/results/workload.txt; head -c 1500 /tmp/results/bench.json | tail -c 600; head -20 /tmp/results/strace_6.txt"))
+            machine.copy_from_machine("/tmp/results", "")
+          '';
+        };
+      });
 
       devShells = forAllSystems ({ pkgs, system }: {
         default = pkgs.mkShell {

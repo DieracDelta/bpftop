@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 
@@ -10,6 +10,19 @@ use super::gpu::GpuCollector;
 use super::process::{ProcessInfo, ProcessState};
 use super::system::*;
 use crate::ebpf::loader::{self, EbpfLoader};
+
+/// Wall time spent in each phase of the most recent `collect()`.
+#[derive(Debug, Clone, Copy, Default)]
+#[allow(dead_code)]
+pub struct CollectTimings {
+    pub system_stats: Duration,
+    pub cgroup_tick: Duration,
+    pub bpf_iter: Duration,
+    pub per_process: Duration,
+    pub gpu: Duration,
+    pub net: Duration,
+    pub tree: Duration,
+}
 
 /// Orchestrates data collection from eBPF programs.
 ///
@@ -28,6 +41,8 @@ pub struct Collector {
     page_size: u64,
     #[cfg(feature = "gpu")]
     gpu_collector: Option<GpuCollector>,
+    #[allow(dead_code)]
+    pub last_timings: CollectTimings,
 }
 
 impl Collector {
@@ -55,6 +70,7 @@ impl Collector {
             page_size,
             #[cfg(feature = "gpu")]
             gpu_collector: GpuCollector::try_new(),
+            last_timings: CollectTimings::default(),
         }
     }
 
@@ -73,11 +89,20 @@ impl Collector {
             page_size: 4096,
             #[cfg(feature = "gpu")]
             gpu_collector: None,
+            last_timings: CollectTimings::default(),
         }
     }
 
     /// Collect all system and process data for one refresh cycle.
     pub fn collect(&mut self) -> Result<(SystemInfo, Vec<ProcessInfo>)> {
+        let mut timings = CollectTimings::default();
+        let mut mark = Instant::now();
+        let mut lap = |slot: &mut Duration| {
+            let now = Instant::now();
+            *slot = now - mark;
+            mark = now;
+        };
+
         // System-wide stats from /proc (unchanged — these are the kernel's
         // official API for aggregate stats)
         let (mut cpu_total, mut cpus) = read_cpu_stats()?;
@@ -93,8 +118,11 @@ impl Collector {
             }
         }
 
+        lap(&mut timings.system_stats);
+
         // Refresh cgroup inode map periodically (once per cycle, not per-process)
         self.cgroup_resolver.tick();
+        lap(&mut timings.cgroup_tick);
 
         // Process data from BPF task iterator (replaces all /proc/{pid} reads)
         // If BPF isn't loaded or read fails, return empty process list
@@ -106,6 +134,7 @@ impl Collector {
                 Vec::new()
             }
         };
+        lap(&mut timings.bpf_iter);
 
         // Classify tasks: processes, user threads, kernel threads
         let mut task_count = 0u32;
@@ -246,6 +275,8 @@ impl Collector {
             });
         }
 
+        lap(&mut timings.per_process);
+
         // GPU data
         let mut gpus = Vec::new();
         #[cfg(feature = "gpu")]
@@ -259,6 +290,8 @@ impl Collector {
                 }
             }
         }
+
+        lap(&mut timings.gpu);
 
         // Network data from BPF kprobes
         let net_stats = self.ebpf.read_net_stats();
@@ -289,6 +322,8 @@ impl Collector {
             }
         }
 
+        lap(&mut timings.net);
+
         // Build parent-child relationships for tree view
         let pid_set: HashMap<u32, usize> = processes
             .iter()
@@ -317,6 +352,8 @@ impl Collector {
             .collect();
         self.prev_net_bytes = new_net_bytes;
         self.prev_net_time = now;
+        lap(&mut timings.tree);
+        self.last_timings = timings;
 
         let sys_info = SystemInfo {
             cpu_total,
