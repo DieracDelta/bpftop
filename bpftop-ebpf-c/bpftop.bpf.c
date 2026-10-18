@@ -73,22 +73,28 @@ struct net_stats {
 	u32 _pad;
 };
 
+/*
+ * Per-process maps are LRU so they degrade gracefully instead of rejecting
+ * inserts once full (e.g. if exits were missed, or > max_entries live
+ * processes): the iterator touches every live PID each refresh, so stale
+ * entries are the ones evicted.
+ */
 struct {
-	__uint(type, BPF_MAP_TYPE_HASH);
+	__uint(type, BPF_MAP_TYPE_LRU_HASH);
 	__uint(max_entries, 32768);
 	__type(key, u32);
 	__type(value, struct cmdline_event);
 } CMDLINE_MAP SEC(".maps");
 
 struct {
-	__uint(type, BPF_MAP_TYPE_HASH);
+	__uint(type, BPF_MAP_TYPE_LRU_HASH);
 	__uint(max_entries, 32768);
 	__type(key, u32);
 	__type(value, struct net_stats);
 } NET_STATS SEC(".maps");
 
 struct {
-	__uint(type, BPF_MAP_TYPE_HASH);
+	__uint(type, BPF_MAP_TYPE_LRU_HASH);
 	__uint(max_entries, 8192);
 	__type(key, u64);
 	__type(value, u64);

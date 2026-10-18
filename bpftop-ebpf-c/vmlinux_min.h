@@ -156,6 +156,7 @@ struct user_pt_regs {
 
 enum {
 	BPF_MAP_TYPE_HASH = 1,
+	BPF_MAP_TYPE_LRU_HASH = 9,
 	BPF_ANY = 0,
 };
 
