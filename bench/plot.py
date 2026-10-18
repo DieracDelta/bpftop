@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
 """Generate gruvbox-themed benchmark graphs from bench/results/ data.
 
+All numbers are per refresh: (cost of 1+K refreshes - cost of 1) / K, as
+recorded by bench/run.sh, so startup and htop's inter-refresh sleep cancel.
+
 Produces:
-  1. syscall_scaling.png  - Syscall count vs process count (O(N) vs ~O(1))
-  2. collection_time.png  - Collection time vs process count with p95 band
-  3. syscall_breakdown.png - Per-syscall breakdown at N=5000
+  1. syscall_scaling.png   - Syscalls per refresh vs process count
+  2. collection_time.png   - CPU time per refresh vs process count
+  3. syscall_breakdown.png - Per-syscall breakdown per refresh at the largest N
 
 Usage: python3 bench/plot.py [--results-dir bench/results]
 """
@@ -13,6 +16,7 @@ import argparse
 import json
 import os
 import re
+import statistics
 from pathlib import Path
 
 import matplotlib
@@ -33,9 +37,6 @@ BR_YELLOW = "#fabd2f"
 BR_BLUE  = "#83a598"
 BR_AQUA  = "#8ec07c"
 BR_ORANGE = "#fe8019"
-
-SCALES = [100, 500, 1000, 2000, 5000, 10000]
-
 
 def setup_style():
     """Configure matplotlib for gruvbox dark theme."""
@@ -89,64 +90,81 @@ def parse_strace(path):
     return total, syscalls
 
 
-def load_bpftop_timing(results_dir, n):
-    """Load bpftop timing JSON for scale point N."""
-    path = os.path.join(results_dir, f"bpftop_timing_{n}.json")
+def load_meta(results_dir, n):
+    path = os.path.join(results_dir, f"meta_{n}.json")
     if not os.path.exists(path):
         return None
     with open(path) as f:
         return json.load(f)
 
 
-def load_hyperfine(results_dir, tool, n):
-    """Load hyperfine JSON for a tool at scale point N.
+def scales_found(results_dir):
+    """Scale points with complete metadata, sorted."""
+    found = []
+    for name in os.listdir(results_dir):
+        m = re.fullmatch(r"meta_(\d+)\.json", name)
+        if m and "extra_refreshes" in (load_meta(results_dir, int(m.group(1))) or {}):
+            found.append(int(m.group(1)))
+    return sorted(found)
 
-    Returns dict with mean/stddev/min/max in seconds, or None.
-    """
-    path = os.path.join(results_dir, f"{tool}_hyperfine_{n}.json")
+
+def per_refresh_syscalls(results_dir, tool, n, k):
+    """{syscall: calls per refresh} from the base/run strace pair."""
+    _, base = parse_strace(os.path.join(results_dir, f"{tool}_strace_{n}_base.txt"))
+    _, run = parse_strace(os.path.join(results_dir, f"{tool}_strace_{n}_run.txt"))
+    if not run:
+        return {}
+    return {
+        name: (run.get(name, 0) - base.get(name, 0)) / k
+        for name in set(base) | set(run)
+        if run.get(name, 0) > base.get(name, 0)
+    }
+
+
+def per_refresh_cpu_ms(results_dir, tool, n, k):
+    """Median user+sys CPU ms per refresh, or None."""
+    path = os.path.join(results_dir, f"{tool}_cpu_{n}.txt")
     if not os.path.exists(path):
         return None
+    samples = {"base": [], "run": []}
     with open(path) as f:
-        data = json.load(f)
-    if "results" not in data or not data["results"]:
+        for line in f:
+            parts = line.split()
+            if len(parts) == 3 and parts[0] in samples:
+                samples[parts[0]].append(float(parts[1]) + float(parts[2]))
+    if not samples["base"] or not samples["run"]:
         return None
-    return data["results"][0]
+    delta = statistics.median(samples["run"]) - statistics.median(samples["base"])
+    return max(delta, 0.0) / k * 1000.0
 
 
-def plot_syscall_scaling(results_dir, output_dir):
-    """Graph 1: Total syscall count vs process count."""
-    bpftop_calls = []
-    htop_calls = []
-    scales_found = []
+def plot_lines(ax, xs, series):
+    for label, color, marker, ys in series:
+        pts = [(x, y) for x, y in zip(xs, ys) if y is not None]
+        if pts:
+            ax.plot(*zip(*pts), color=color, marker=marker, linewidth=2,
+                    markersize=8, label=label, zorder=3)
 
-    for n in SCALES:
-        bt, _ = parse_strace(os.path.join(results_dir, f"bpftop_strace_{n}.txt"))
-        ht, _ = parse_strace(os.path.join(results_dir, f"htop_strace_{n}.txt"))
-        if bt > 0 or ht > 0:
-            scales_found.append(n)
-            bpftop_calls.append(bt)
-            htop_calls.append(ht)
 
-    if not scales_found:
-        print("WARNING: No strace data found, skipping syscall_scaling.png")
-        return
+def plot_syscall_scaling(results_dir, output_dir, scales):
+    """Graph 1: syscalls per refresh vs process count."""
+    procs, bpf, htop = [], [], []
+    for n in scales:
+        meta = load_meta(results_dir, n)
+        k = meta["extra_refreshes"]
+        b = per_refresh_syscalls(results_dir, "bpftop", n, k)
+        h = per_refresh_syscalls(results_dir, "htop", n, k)
+        procs.append(meta["actual_procs"])
+        bpf.append(sum(b.values()) if b else None)
+        htop.append(sum(h.values()) if h else None)
 
     fig, ax = plt.subplots(figsize=(10, 6))
-
-    ax.plot(scales_found, htop_calls, color=BR_RED, marker="o",
-            linewidth=2, markersize=8, label="htop", zorder=3)
-    ax.plot(scales_found, bpftop_calls, color=BR_GREEN, marker="s",
-            linewidth=2, markersize=8, label="bpftop", zorder=3)
-
+    plot_lines(ax, procs, [("htop", BR_RED, "o", htop), ("bpftop", BR_GREEN, "s", bpf)])
+    ax.set_yscale("log")
     ax.set_xlabel("Process Count")
-    ax.set_ylabel("Syscalls per Benchmark Run")
-    ax.set_title("Syscall Scaling: bpftop vs htop", fontsize=14, fontweight="bold")
+    ax.set_ylabel("Syscalls per Refresh (log)")
+    ax.set_title("Syscalls per Refresh: bpftop vs htop", fontsize=14, fontweight="bold")
     ax.legend(fontsize=12)
-
-    # Format y-axis with K suffix for thousands
-    ax.yaxis.set_major_formatter(
-        matplotlib.ticker.FuncFormatter(lambda x, _: f"{x/1000:.0f}K" if x >= 1000 else f"{x:.0f}")
-    )
 
     out = os.path.join(output_dir, "syscall_scaling.png")
     fig.savefig(out)
@@ -154,73 +172,21 @@ def plot_syscall_scaling(results_dir, output_dir):
     print(f"  Saved {out}")
 
 
-def plot_collection_time(results_dir, output_dir):
-    """Graph 2: Collection time vs process count (hyperfine data)."""
-    bpf_means = []
-    bpf_stddevs = []
-    htop_means = []
-    htop_stddevs = []
-    scales_found = []
-
-    for n in SCALES:
-        bpf = load_hyperfine(results_dir, "bpftop", n)
-        ht = load_hyperfine(results_dir, "htop", n)
-        if bpf is None and ht is None:
-            # Fall back to internal bench timing for bpftop
-            data = load_bpftop_timing(results_dir, n)
-            if data is None:
-                continue
-            scales_found.append(n)
-            s = data["stats"]
-            bpf_means.append(s["mean_us"] / 1000.0)  # us -> ms
-            bpf_stddevs.append(s["stddev_us"] / 1000.0)
-            htop_means.append(None)
-            htop_stddevs.append(None)
-        else:
-            scales_found.append(n)
-            if bpf:
-                bpf_means.append(bpf["mean"] * 1000)  # s -> ms
-                bpf_stddevs.append(bpf["stddev"] * 1000)
-            else:
-                bpf_means.append(None)
-                bpf_stddevs.append(None)
-            if ht:
-                htop_means.append(ht["mean"] * 1000)
-                htop_stddevs.append(ht["stddev"] * 1000)
-            else:
-                htop_means.append(None)
-                htop_stddevs.append(None)
-
-    if not scales_found:
-        print("WARNING: No timing data found, skipping collection_time.png")
-        return
+def plot_cpu_time(results_dir, output_dir, scales):
+    """Graph 2: CPU time (user+sys) per refresh vs process count."""
+    procs, bpf, htop = [], [], []
+    for n in scales:
+        meta = load_meta(results_dir, n)
+        k = meta["extra_refreshes"]
+        procs.append(meta["actual_procs"])
+        bpf.append(per_refresh_cpu_ms(results_dir, "bpftop", n, k))
+        htop.append(per_refresh_cpu_ms(results_dir, "htop", n, k))
 
     fig, ax = plt.subplots(figsize=(10, 6))
-
-    # Plot bpftop
-    bpf_x = [s for s, m in zip(scales_found, bpf_means) if m is not None]
-    bpf_y = np.array([m for m in bpf_means if m is not None])
-    bpf_err = np.array([s for s in bpf_stddevs if s is not None])
-    if len(bpf_x) > 0:
-        ax.fill_between(bpf_x, bpf_y - bpf_err, bpf_y + bpf_err,
-                         alpha=0.2, color=BR_GREEN)
-        ax.plot(bpf_x, bpf_y, color=BR_GREEN, marker="s",
-                linewidth=2, markersize=8, label="bpftop", zorder=3)
-
-    # Plot htop
-    ht_x = [s for s, m in zip(scales_found, htop_means) if m is not None]
-    ht_y = np.array([m for m in htop_means if m is not None])
-    ht_err = np.array([s for s in htop_stddevs if s is not None])
-    if len(ht_x) > 0:
-        ax.fill_between(ht_x, ht_y - ht_err, ht_y + ht_err,
-                         alpha=0.2, color=BR_RED)
-        ax.plot(ht_x, ht_y, color=BR_RED, marker="o",
-                linewidth=2, markersize=8, label="htop", zorder=3)
-
+    plot_lines(ax, procs, [("htop", BR_RED, "o", htop), ("bpftop", BR_GREEN, "s", bpf)])
     ax.set_xlabel("Process Count")
-    ax.set_ylabel("Time per Refresh (ms)")
-    ax.set_title("Refresh Time: bpftop vs htop (hyperfine)",
-                 fontsize=14, fontweight="bold")
+    ax.set_ylabel("CPU Time per Refresh (ms, user+sys)")
+    ax.set_title("CPU Cost per Refresh: bpftop vs htop", fontsize=14, fontweight="bold")
     ax.legend(fontsize=12)
 
     out = os.path.join(output_dir, "collection_time.png")
@@ -229,68 +195,33 @@ def plot_collection_time(results_dir, output_dir):
     print(f"  Saved {out}")
 
 
-def plot_syscall_breakdown(results_dir, output_dir, target_n=5000):
-    """Graph 3: Horizontal bar chart of per-syscall counts at N=target_n."""
-    _, bpf_syscalls = parse_strace(
-        os.path.join(results_dir, f"bpftop_strace_{target_n}.txt")
-    )
-    _, htop_syscalls = parse_strace(
-        os.path.join(results_dir, f"htop_strace_{target_n}.txt")
-    )
+def plot_syscall_breakdown(results_dir, output_dir, scales):
+    """Graph 3: per-syscall calls per refresh at the largest scale."""
+    n = scales[-1]
+    k = load_meta(results_dir, n)["extra_refreshes"]
+    bpf = per_refresh_syscalls(results_dir, "bpftop", n, k)
+    htop = per_refresh_syscalls(results_dir, "htop", n, k)
 
-    if not bpf_syscalls and not htop_syscalls:
-        # Try the largest available scale
-        for n in reversed(SCALES):
-            _, bpf_syscalls = parse_strace(
-                os.path.join(results_dir, f"bpftop_strace_{n}.txt")
-            )
-            _, htop_syscalls = parse_strace(
-                os.path.join(results_dir, f"htop_strace_{n}.txt")
-            )
-            if bpf_syscalls or htop_syscalls:
-                target_n = n
-                break
-        else:
-            print("WARNING: No strace data found, skipping syscall_breakdown.png")
-            return
-
-    # Get top syscalls from htop (most interesting)
-    all_names = set(bpf_syscalls.keys()) | set(htop_syscalls.keys())
-    # Sort by htop count descending, take top 15
-    sorted_names = sorted(all_names, key=lambda s: htop_syscalls.get(s, 0), reverse=True)[:15]
-    sorted_names.reverse()  # bottom-to-top for horizontal bars
-
-    bpf_vals = [bpf_syscalls.get(n, 0) for n in sorted_names]
-    htop_vals = [htop_syscalls.get(n, 0) for n in sorted_names]
+    names = sorted(set(bpf) | set(htop), key=lambda s: max(htop.get(s, 0), bpf.get(s, 0)), reverse=True)[:15]
+    names.reverse()  # bottom-to-top for horizontal bars
 
     fig, ax = plt.subplots(figsize=(12, 7))
-    y = np.arange(len(sorted_names))
+    y = np.arange(len(names))
     height = 0.35
-
-    ax.barh(y + height / 2, htop_vals, height, color=BR_RED, label="htop", zorder=3)
-    ax.barh(y - height / 2, bpf_vals, height, color=BR_GREEN, label="bpftop", zorder=3)
-
+    ax.barh(y + height / 2, [htop.get(s, 0) for s in names], height, color=BR_RED, label="htop", zorder=3)
+    ax.barh(y - height / 2, [bpf.get(s, 0) for s in names], height, color=BR_GREEN, label="bpftop", zorder=3)
     ax.set_yticks(y)
-    ax.set_yticklabels(sorted_names)
-    ax.set_xlabel("Syscall Count")
-    ax.set_title(f"Syscall Breakdown at N={target_n}", fontsize=14, fontweight="bold")
+    ax.set_yticklabels(names)
+    ax.set_xscale("log")
+    ax.set_xlabel("Calls per Refresh (log)")
+    procs = load_meta(results_dir, n)["actual_procs"]
+    ax.set_title(f"Syscall Breakdown per Refresh ({procs} processes)", fontsize=14, fontweight="bold")
     ax.legend(fontsize=12, loc="lower right")
-
-    # Log scale if the difference is huge
-    max_val = max(max(htop_vals, default=1), max(bpf_vals, default=1))
-    min_val = min(
-        min((v for v in htop_vals if v > 0), default=1),
-        min((v for v in bpf_vals if v > 0), default=1),
-    )
-    if max_val > min_val * 100:
-        ax.set_xscale("log")
 
     out = os.path.join(output_dir, "syscall_breakdown.png")
     fig.savefig(out)
     plt.close(fig)
     print(f"  Saved {out}")
-
-
 
 
 def main():
@@ -310,12 +241,17 @@ def main():
         print("  Run 'sudo bash bench/run.sh' first.")
         return 1
 
+    scales = scales_found(results_dir)
+    if not scales:
+        print(f"ERROR: no bench/run.sh results (meta_N.json) in {results_dir}")
+        return 1
+
     setup_style()
 
-    print("Generating benchmark graphs...")
-    plot_syscall_scaling(results_dir, output_dir)
-    plot_collection_time(results_dir, output_dir)
-    plot_syscall_breakdown(results_dir, output_dir)
+    print(f"Generating benchmark graphs for N={scales}...")
+    plot_syscall_scaling(results_dir, output_dir, scales)
+    plot_cpu_time(results_dir, output_dir, scales)
+    plot_syscall_breakdown(results_dir, output_dir, scales)
     print("Done.")
     return 0
 

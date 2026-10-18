@@ -161,6 +161,7 @@
               self.packages.${system}.bench
               pkgs.strace
               pkgs.python3
+              pkgs.htop
               netbench
             ];
           };
@@ -276,6 +277,13 @@
             netbench("none2")
             print(machine.succeed("grep -H . /tmp/results/net_*.txt"))
 
+            # ── bench/run.sh end to end at one small scale ───────────
+            machine.succeed(
+                "SCALES=100 K=5 REPS=2 BENCH_BIN=$(command -v bench) RESULTS_DIR=/tmp/results/runsh "
+                "bash ${./bench}/run.sh >&2"
+            )
+            print(machine.succeed("cd /tmp/results/runsh && ls && cat meta_100.json *_cpu_100.txt"))
+
             machine.copy_from_machine("/tmp/results", "")
           '';
         };
@@ -302,7 +310,6 @@
             elfutils
             # Benchmarking
             hyperfine
-            time
             strace
             htop
             (python3.withPackages (ps: [ ps.matplotlib ps.numpy ]))

@@ -137,21 +137,21 @@ htop inspired this.
 
 # Performance
 
-bpftop does one BPF iterator walk + 4 `/proc` reads per cycle. htop does ~4 file reads per process. And so, syscall count scales linearly with process count for htop, but stays flat for bpftop.
+bpftop does one BPF iterator walk + one read of each of 4 `/proc` files per refresh. The per-process extras (cmdlines, network bytes, cgroup freeze state) are joined in-kernel by the iterator and usernames are cached, so a steady-state refresh is a few dozen syscalls whatever the process count. htop does ~4 file reads per process. And so, syscall count scales linearly with process count for htop, but stays flat for bpftop.
 
 ![Syscall Scaling](bench/results/syscall_scaling.png)
 
-![Collection Time](bench/results/collection_time.png)
+![CPU Time per Refresh](bench/results/collection_time.png)
 
 ![Syscall Breakdown](bench/results/syscall_breakdown.png)
 
 ## Reproducing the benchmarks
 
 ```bash
-cargo build --release --bin bench
 nix develop
-sudo bash bench/run.sh
+cargo xtask build-ebpf && cargo build --release --bin bench
+sudo env "PATH=$PATH" bash bench/run.sh   # SCALES="100 1000" K=20 REPS=5 to override
 python3 bench/plot.py
 ```
 
-See `bench/` for full methodology. I used [hyperfine](https://github.com/sharkdp/hyperfine) for timing, `strace -c` for syscall counts.
+Both tools are measured the same way: one run with 1 refresh and one with 1+K refreshes, and the difference divided by K is the per-refresh cost, so startup (BPF load for bpftop) and htop's delay between refreshes cancel out. `strace -c` counts syscalls; CPU time is user+sys from `wait4`. See `bench/run.sh` for details.

@@ -1,22 +1,25 @@
 #!/usr/bin/env bash
-# Benchmark orchestration: bpftop vs htop at varying process counts.
+# Benchmark bpftop vs htop: syscalls and CPU time per refresh, at varying
+# process counts.
 #
-# Uses hyperfine for statistically rigorous timing, strace for syscall counts.
-# Spawns dummy processes at each scale point, benchmarks both tools.
+# Both tools are measured the same way: one run with 1 refresh and one
+# with 1+K refreshes. The difference divided by K is the per-refresh cost,
+# which cancels out startup (BPF load and BTF parsing for bpftop, init for
+# htop) and htop's sleep between refreshes.
 #
 # Usage: sudo bash bench/run.sh
+# Knobs (env): SCALES="100 1000" K=20 REPS=5 BENCH_BIN=... RESULTS_DIR=...
 
 set -euo pipefail
 
-DUMMY_PIDS=()
-
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-RESULTS_DIR="$SCRIPT_DIR/results"
-BENCH_BIN="${SCRIPT_DIR}/../target/release/bench"
-HYPERFINE_RUNS=20
-HYPERFINE_WARMUP=3
-HTOP_REFRESHES=5
-SCALES=(100 500 1000 2000 5000 10000)
+RESULTS_DIR="${RESULTS_DIR:-$SCRIPT_DIR/results}"
+BENCH_BIN="${BENCH_BIN:-$SCRIPT_DIR/../target/release/bench}"
+CPUTIME="python3 $SCRIPT_DIR/cputime.py"
+read -ra SCALES <<< "${SCALES:-100 500 1000 2000 5000 10000}"
+K="${K:-20}"        # extra refreshes in the "run" measurement
+REPS="${REPS:-5}"   # CPU time repetitions (plot.py takes the median)
+DUMMY_PIDS=()
 
 mkdir -p "$RESULTS_DIR"
 
@@ -24,9 +27,10 @@ mkdir -p "$RESULTS_DIR"
 
 log() { echo ">>> $*" >&2; }
 
-count_procs() {
-    ls -1d /proc/[0-9]* 2>/dev/null | wc -l
-}
+# Glob counts: an `ls | wc` pipeline fails under pipefail when a PID from
+# the glob exits before ls stats it.
+count_procs() { local p=(/proc/[0-9]*); echo "${#p[@]}"; }
+count_tasks() { local t=(/proc/[0-9]*/task/*); echo "${#t[@]}"; }
 
 # Spawn N dummy sleep processes, store PIDs in DUMMY_PIDS array
 spawn_dummies() {
@@ -38,7 +42,6 @@ spawn_dummies() {
         DUMMY_PIDS+=($!)
     done
     sleep 1
-    log "$(count_procs) total processes visible in /proc"
 }
 
 kill_dummies() {
@@ -53,6 +56,20 @@ kill_dummies() {
 
 trap kill_dummies EXIT
 
+# Command line doing N refreshes.
+bpftop_cmd() { echo "$BENCH_BIN --iterations $1 --warmup 0"; }
+htop_cmd() { echo "htop -d 1 -n $1"; }
+
+# Run a command; htop needs a terminal, so it gets a pseudo-terminal.
+run_as() {
+    local tool=$1; shift
+    if [ "$tool" = htop ]; then
+        script -qfec "$*" /dev/null > /dev/null
+    else
+        "$@" > /dev/null 2>&1
+    fi
+}
+
 # ── Preflight checks ────────────────────────────────────────────
 
 if [ "$(id -u)" -ne 0 ]; then
@@ -66,13 +83,9 @@ if [ ! -x "$BENCH_BIN" ]; then
     exit 1
 fi
 
-command -v strace >/dev/null || { echo "ERROR: strace not found" >&2; exit 1; }
-command -v htop >/dev/null || { echo "ERROR: htop not found" >&2; exit 1; }
-command -v hyperfine >/dev/null || { echo "ERROR: hyperfine not found" >&2; exit 1; }
-
-# ── Baseline ─────────────────────────────────────────────────────
-
-log "Recording baseline process count: $(count_procs)"
+for cmd in strace htop script python3; do
+    command -v "$cmd" >/dev/null || { echo "ERROR: $cmd not found" >&2; exit 1; }
+done
 
 # ── Main benchmark loop ─────────────────────────────────────────
 
@@ -83,65 +96,40 @@ for N in "${SCALES[@]}"; do
 
     spawn_dummies "$N"
     ACTUAL_PROCS=$(count_procs)
-    log "Actual process count: $ACTUAL_PROCS"
+    ACTUAL_TASKS=$(count_tasks)
+    log "$ACTUAL_PROCS processes, $ACTUAL_TASKS tasks"
 
-    # ── bpftop: hyperfine timing ─────────────────────────────
-    # bench binary does 1 BPF iteration per invocation with --iterations 1 --warmup 0
-    # hyperfine handles the repetition and statistics.
-    log "Running bpftop via hyperfine..."
-    hyperfine \
-        --runs "$HYPERFINE_RUNS" \
-        --warmup "$HYPERFINE_WARMUP" \
-        --export-json "$RESULTS_DIR/bpftop_hyperfine_${N}.json" \
-        --command-name "bpftop (N=$N)" \
-        "$BENCH_BIN --iterations 1 --warmup 0" \
-        2>&1 | tee "$RESULTS_DIR/bpftop_hyperfine_${N}.log" >&2
+    for tool in bpftop htop; do
+        cpu_file="$RESULTS_DIR/${tool}_cpu_${N}.txt"
+        rm -f "$cpu_file"
+        for label in base run; do
+            refreshes=1
+            [ "$label" = run ] && refreshes=$((K + 1))
+            cmd=$("${tool}_cmd" "$refreshes")
 
-    # Also run the bench binary's own detailed timing (has percentiles)
-    log "Running bpftop bench (internal timing)..."
+            log "$tool: $refreshes refresh(es), strace"
+            run_as "$tool" strace -f -c -S calls -o "$RESULTS_DIR/${tool}_strace_${N}_${label}.txt" $cmd
+
+            log "$tool: $refreshes refresh(es), CPU time x$REPS"
+            for ((r = 0; r < REPS; r++)); do
+                run_as "$tool" $CPUTIME "$cpu_file" "$label" $cmd
+            done
+        done
+    done
+
+    # In-process collect() latency percentiles (bpftop only)
+    log "bpftop: in-process timing"
     "$BENCH_BIN" --iterations 50 --warmup 5 --json \
         > "$RESULTS_DIR/bpftop_timing_${N}.json" 2>/dev/null
 
-    # ── htop: hyperfine timing ───────────────────────────────
-    # htop needs a tty; use script(1) to provide one.
-    log "Running htop via hyperfine..."
-    hyperfine \
-        --runs "$HYPERFINE_RUNS" \
-        --warmup "$HYPERFINE_WARMUP" \
-        --export-json "$RESULTS_DIR/htop_hyperfine_${N}.json" \
-        --command-name "htop (N=$N)" \
-        "script -qfc 'htop -d 1 -n $HTOP_REFRESHES' /dev/null > /dev/null" \
-        2>&1 | tee "$RESULTS_DIR/htop_hyperfine_${N}.log" >&2
-
-    # ── bpftop: syscall count (strace pass) ──────────────────
-    log "Running bpftop bench (strace pass)..."
-    strace -c -S calls -o "$RESULTS_DIR/bpftop_strace_${N}.txt" \
-        "$BENCH_BIN" --iterations 5 --warmup 1 2>/dev/null
-
-    # ── htop: syscall count (strace pass) ────────────────────
-    # -f follows forks so we trace htop, not just the script wrapper
-    log "Running htop (strace pass)..."
-    strace -f -c -S calls -o "$RESULTS_DIR/htop_strace_${N}.txt" \
-        script -qfc "htop -d 1 -n $HTOP_REFRESHES" /dev/null \
-        > /dev/null 2>&1 || true
-
-    # ── Head-to-head hyperfine comparison ────────────────────
-    log "Running head-to-head comparison..."
-    hyperfine \
-        --runs "$HYPERFINE_RUNS" \
-        --warmup "$HYPERFINE_WARMUP" \
-        --export-json "$RESULTS_DIR/comparison_${N}.json" \
-        --command-name "bpftop" "$BENCH_BIN --iterations 1 --warmup 0" \
-        --command-name "htop" "script -qfc 'htop -d 1 -n $HTOP_REFRESHES' /dev/null > /dev/null" \
-        2>&1 | tee "$RESULTS_DIR/comparison_${N}.log" >&2
-
-    # Record metadata
     cat > "$RESULTS_DIR/meta_${N}.json" <<METAEOF
 {
     "scale": $N,
     "actual_procs": $ACTUAL_PROCS,
-    "hyperfine_runs": $HYPERFINE_RUNS,
-    "htop_refreshes": $HTOP_REFRESHES,
+    "actual_tasks": $ACTUAL_TASKS,
+    "extra_refreshes": $K,
+    "cpu_reps": $REPS,
+    "kernel": "$(uname -r)",
     "timestamp": "$(date -Iseconds)"
 }
 METAEOF
@@ -153,13 +141,10 @@ done
 log ""
 log "All benchmarks complete. Results in $RESULTS_DIR/"
 log ""
-log "Files per scale point:"
-log "  bpftop_hyperfine_N.json - hyperfine results for bpftop"
-log "  htop_hyperfine_N.json   - hyperfine results for htop"
-log "  comparison_N.json       - head-to-head hyperfine comparison"
-log "  bpftop_timing_N.json    - bpftop internal timing (percentiles)"
-log "  bpftop_strace_N.txt     - bpftop syscall summary"
-log "  htop_strace_N.txt       - htop syscall summary"
-log "  meta_N.json             - run metadata"
+log "Files per scale point (TOOL = bpftop | htop):"
+log "  TOOL_strace_N_{base,run}.txt - strace -c of 1 and 1+K refreshes"
+log "  TOOL_cpu_N.txt               - CPU time (label user sys) per repetition"
+log "  bpftop_timing_N.json         - bpftop in-process collect() timing"
+log "  meta_N.json                  - run metadata"
 log ""
 log "Run 'python3 bench/plot.py' to generate graphs."
