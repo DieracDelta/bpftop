@@ -13,8 +13,7 @@ use aya::programs::TracePoint;
 use aya::{Btf, Ebpf};
 use bpftop_common::{parse_iter_records, CmdlineEvent, TaskInfo};
 
-/// Path relative to this file (src/bin/diagnose.rs):
-///   ../../../../bpftop-ebpf/target/bpfel-unknown-none/release/bpftop-ebpf
+/// CO-RE object built from bpftop-ebpf-c/ (`cargo xtask build-ebpf`).
 static BPF_OBJ: &[u8] =
     aya::include_bytes_aligned!("../../../bpftop-ebpf-c/target/bpftop.bpf.o");
 

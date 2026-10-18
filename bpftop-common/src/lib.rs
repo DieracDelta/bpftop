@@ -1,10 +1,7 @@
-#![cfg_attr(not(feature = "userspace"), no_std)]
-
 /// Process/task information collected by the eBPF task iterator.
 /// This struct is written by the eBPF program and read by userspace.
 #[repr(C)]
-#[derive(Clone, Copy)]
-#[cfg_attr(feature = "userspace", derive(Debug))]
+#[derive(Clone, Copy, Debug)]
 pub struct TaskInfo {
     /// Process ID (tgid in kernel terms)
     pub pid: u32,
@@ -57,8 +54,7 @@ pub struct TaskInfo {
 /// place of a full `TaskInfo`. Shares the `pid`/`tid` prefix with
 /// `TaskInfo`; `tid != pid` is what distinguishes the two in the stream.
 #[repr(C)]
-#[derive(Clone, Copy)]
-#[cfg_attr(feature = "userspace", derive(Debug))]
+#[derive(Clone, Copy, Debug)]
 pub struct ThreadCpu {
     pub pid: u32,
     pub tid: u32,
@@ -68,8 +64,7 @@ pub struct ThreadCpu {
 /// Command line event captured by sched_process_exec tracepoint.
 /// Stored in CMDLINE_MAP keyed by PID.
 #[repr(C)]
-#[derive(Clone, Copy)]
-#[cfg_attr(feature = "userspace", derive(Debug))]
+#[derive(Clone, Copy, Debug)]
 pub struct CmdlineEvent {
     pub pid: u32,
     pub len: u32,
@@ -80,42 +75,12 @@ pub struct CmdlineEvent {
 
 /// Per-process network I/O stats collected by kprobes on tcp/udp send/recv.
 #[repr(C)]
-#[derive(Clone, Copy)]
-#[cfg_attr(feature = "userspace", derive(Debug))]
+#[derive(Clone, Copy, Debug)]
 pub struct NetStats {
     pub tx_bytes: u64,
     pub rx_bytes: u64,
     pub ifindex: u32,
     pub _pad: u32,
-}
-
-/// File descriptor information collected by the eBPF file iterator.
-#[repr(C)]
-#[derive(Clone, Copy)]
-#[cfg_attr(feature = "userspace", derive(Debug))]
-pub struct FileInfo {
-    /// Process ID that owns this FD
-    pub pid: u32,
-    /// File descriptor number
-    pub fd: u32,
-    /// Type of FD: 0=regular, 1=socket, 2=pipe, 3=other
-    pub fd_type: u8,
-    /// Socket address family (AF_INET=2, AF_INET6=10, AF_UNIX=1)
-    pub sock_family: u8,
-    /// Socket type (SOCK_STREAM=1, SOCK_DGRAM=2)
-    pub sock_type: u8,
-    /// TCP connection state
-    pub sock_state: u8,
-    /// Source address (IPv4 in first 4 bytes, or full IPv6)
-    pub src_addr: [u8; 16],
-    /// Destination address
-    pub dst_addr: [u8; 16],
-    /// Source port (network byte order)
-    pub src_port: u16,
-    /// Destination port (network byte order)
-    pub dst_port: u16,
-    /// File path or unix socket path, null-terminated
-    pub path: [u8; 256],
 }
 
 // Keep in sync with bpftop-ebpf-c/bpftop.bpf.c (asserted on both sides).
@@ -124,7 +89,6 @@ const _: () = assert!(core::mem::size_of::<CmdlineEvent>() == 272);
 const _: () = assert!(core::mem::size_of::<ThreadCpu>() == 16);
 
 /// Parsed output of one task iterator walk.
-#[cfg(feature = "userspace")]
 #[derive(Debug, Default)]
 pub struct IterRecords {
     /// One per thread-group leader.
@@ -136,7 +100,6 @@ pub struct IterRecords {
 
 /// Split the iterator's mixed `TaskInfo`/`ThreadCpu` stream. Returns the
 /// byte offset of the first truncated record on error.
-#[cfg(feature = "userspace")]
 pub fn parse_iter_records(buf: &[u8]) -> Result<IterRecords, usize> {
     use core::mem::size_of;
 
@@ -170,19 +133,13 @@ pub fn parse_iter_records(buf: &[u8]) -> Result<IterRecords, usize> {
     Ok(out)
 }
 
-#[cfg(feature = "userspace")]
 unsafe impl aya::Pod for TaskInfo {}
 
-#[cfg(feature = "userspace")]
-unsafe impl aya::Pod for FileInfo {}
-
-#[cfg(feature = "userspace")]
 unsafe impl aya::Pod for CmdlineEvent {}
 
-#[cfg(feature = "userspace")]
 unsafe impl aya::Pod for NetStats {}
 
-#[cfg(all(test, feature = "userspace"))]
+#[cfg(test)]
 mod tests {
     use super::*;
 

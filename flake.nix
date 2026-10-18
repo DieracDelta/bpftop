@@ -27,9 +27,7 @@
     in {
       packages = forAllSystems ({ pkgs, system }:
         let
-          rustNightly = pkgs.rust-bin.nightly.latest.default.override {
-            extensions = [ "rust-src" ];
-          };
+          rustToolchain = pkgs.rust-bin.stable.latest.default;
 
           workspaceVendor = pkgs.rustPlatform.fetchCargoVendor {
             src = ./.;
@@ -116,20 +114,19 @@
         in {
           default = mkBpftop {
             pname = "bpftop";
-            rustToolchain = rustNightly;
+            inherit rustToolchain;
           };
 
           # bpftop plus the headless collection benchmark.
           bench = mkBpftop {
             pname = "bpftop-bench";
-            rustToolchain = rustNightly;
+            inherit rustToolchain;
             bins = [ "bpftop" "bench" ];
           };
 
           static = mkBpftop {
             pname = "bpftop-static";
-            rustToolchain = pkgs.rust-bin.nightly.latest.default.override {
-              extensions = [ "rust-src" ];
+            rustToolchain = pkgs.rust-bin.stable.latest.default.override {
               targets = [ muslTarget ];
             };
             cargoTarget = muslTarget;
@@ -287,10 +284,8 @@
       devShells = forAllSystems ({ pkgs, system }: {
         default = pkgs.mkShell {
           buildInputs = with pkgs; [
-            # Rust toolchain via oxalica (nightly required for aya-bpf)
-            # bpfel-unknown-none is a built-in target (not a rustup target),
-            # so we just need rust-src for -Z build-std to work.
-            (rust-bin.nightly.latest.default.override {
+            # Stable Rust via oxalica; rust-src for rust-analyzer.
+            (rust-bin.stable.latest.default.override {
               extensions = [ "rust-src" ];
             })
             # rust-analyzer via fenix
@@ -307,6 +302,7 @@
             elfutils
             # Benchmarking
             hyperfine
+            time
             strace
             htop
             (python3.withPackages (ps: [ ps.matplotlib ps.numpy ]))
@@ -315,12 +311,8 @@
             agg
           ];
 
-          LIBCLANG_PATH = "${(llvmFor pkgs).libclang.lib}/lib";
-
-          shellHook = ''
-            # bpf-linker is installed via: cargo install bpf-linker
-            export PATH="$HOME/.cargo/bin:$PATH"
-          '';
+          # For `cargo xtask build-ebpf`.
+          LIBBPF_INCLUDE = "${pkgs.libbpf}/include";
         };
       });
 

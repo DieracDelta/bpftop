@@ -22,7 +22,7 @@ I worked closely with claude-code while building this. Claude has touched many p
 - BLAZINGLY FAST because the heavy lifting is done kernel-sid3
 - Container aware (docker+podman) for each process
 - Shows which systemd unit (`.service`, `.slice`, `.scope`) owns a process — useful when you have 15 things all named `python3`
-- Per-process network I/O tracking via kprobes on tcp/udp send/recv (`N` to toggle). Still in eBPF land, so no syscall overhead here either!
+- Per-process network I/O tracking via fexit hooks on tcp/udp (IPv4 + IPv6) send/recv, with a kprobe fallback for older kernels (`N` to toggle). Still in eBPF land, so no syscall overhead here either!
 - NVIDIA GPU usage per process (VRAM+%used)
 - Cgroup v2 freeze/thaw — freeze entire services or containers atomically (press `f`). This is OP!!
 - Vim keybindings, folding, visual mode, first class support for yank to clipboard that works in tmux
@@ -80,13 +80,11 @@ sudo ./result/bin/bpftop
 
 ## Non-Nix Linux
 
-You need nightly rust, `rust-src`, and `bpf-linker`.
+You need stable rust, clang (any recent version with the BPF target), and the libbpf headers (`libbpf-dev` / `libbpf-devel`).
 
 ```bash
-# eBPF object first (use arch-aarch64 on arm64 instead of arch-x86_64)
-cd bpftop-ebpf
-cargo build --target bpfel-unknown-none -Z build-std=core --release --features arch-x86_64
-cd ..
+# eBPF object first (finds the libbpf headers via pkg-config, or set LIBBPF_INCLUDE)
+cargo xtask build-ebpf
 
 # userspace binary
 cargo build --release --bin bpftop
@@ -116,22 +114,16 @@ bpftop -u jrestivo         # filter by user
 
 ```bash
 nix develop
-cd bpftop-ebpf && cargo build --target bpfel-unknown-none -Z build-std=core --release --features arch-x86_64 && cd ..
-cargo build --release --bin bpftop
-sudo ./target/release/bpftop
+cargo xtask run --release        # builds the eBPF object + bpftop, runs it with sudo
 ```
+
+`nix build .#checks.x86_64-linux.bench-vm` runs bpftop as root in a NixOS VM against a synthetic workload, checks the collected data (cmdlines, CPU%, users, network bytes, freeze state) and records syscall counts per refresh. It's slow without KVM.
 
 # Build details
 
-We have a two-phase build. The eBPF program compiles for `bpfel-unknown-none` with `-Z build-std=core`, then the userspace binary embeds it at compile time via `include_bytes_aligned!`. The eBPF crate is excluded from the workspace because it targets a different architecture, and cargo doesn't provide a "nice" way to handle this AFAIU.
+We have a two-phase build. The kernel-facing eBPF program in `bpftop-ebpf-c/` is plain C compiled with clang as a CO-RE object, then the userspace binary embeds it at compile time via `include_bytes_aligned!`. Kernel struct fields (`task_struct`, `mm_struct`, `sock`, etc.) are relocated by Aya at load time from the running kernel's BTF, so the binary is not tied to a single kernel's byte offsets. `vmlinux_min.h` declares only the fields we read.
 
-The nix package builds bpf-linker v0.10.1 from source against LLVM 22. nixpkgs ships 0.9.15 with LLVM 21 which can't read objects produced by the newer LLVM.
-
-# eBPF build
-
-The kernel-facing eBPF program is written in C and built as a CO-RE object. Kernel struct fields (`task_struct`, `mm_struct`, `sock`, etc.) are read through BTF relocations at load time, so the binary is not tied to a single kernel's byte offsets. Userspace stays Rust/Aya and embeds the compiled C object via `include_bytes_aligned!`.
-
-Network stats (NET/s, NET TOT) are cumulative since bpftop was started, not since process start. There's no kernel-level per-process network accounting, so we use kprobes on tcp/udp send/recv. A daemon that runs at boot would give lifetime stats, but that's a different tool.
+Network stats (NET/s, NET TOT) are cumulative since bpftop was started, not since process start. There's no kernel-level per-process network accounting, so we hook tcp/udp send/recv: fexit (BPF trampolines, 5.17+) where the kernel supports it, kprobes otherwise. `BPFTOP_NET_PROBES=kprobe` forces the fallback. A daemon that runs at boot would give lifetime stats, but that's a different tool.
 
 # Tested on
 
