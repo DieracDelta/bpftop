@@ -152,28 +152,20 @@ impl CgroupResolver {
 /// Podman:     /user.slice/user-1000.slice/.../libpod-<id>.scope
 /// k8s:        /kubepods/burstable/pod<uid>/<container-id>
 fn parse_container_from_cgroup(cgroup_path: &str) -> Option<ContainerInfo> {
-    // Docker pattern
-    if let Some(id) = extract_scope_id(cgroup_path, "docker-") {
-        return Some(ContainerInfo {
-            name: short_id(&id),
-            runtime: ContainerRuntime::Docker,
-        });
-    }
-
-    // Containerd pattern
-    if let Some(id) = extract_scope_id(cgroup_path, "containerd-") {
-        return Some(ContainerInfo {
-            name: short_id(&id),
-            runtime: ContainerRuntime::Containerd,
-        });
-    }
-
-    // Podman pattern
-    if let Some(id) = extract_scope_id(cgroup_path, "libpod-") {
-        return Some(ContainerInfo {
-            name: short_id(&id),
-            runtime: ContainerRuntime::Podman,
-        });
+    let runtimes = [
+        ("docker-", ContainerRuntime::Docker),
+        ("containerd-", ContainerRuntime::Containerd),
+        ("libpod-", ContainerRuntime::Podman),
+    ];
+    for (prefix, runtime) in runtimes {
+        if let Some(id) = extract_scope_id(cgroup_path, prefix) {
+            // Podman's conmon monitor runs in libpod-conmon-<id>.scope.
+            let id = id.strip_prefix("conmon-").unwrap_or(&id);
+            return Some(ContainerInfo {
+                name: container_name(runtime, id, cgroup_path).unwrap_or_else(|| short_id(id)),
+                runtime,
+            });
+        }
     }
 
     // Kubernetes pattern: /kubepods/.../pod<uid>/<container-id>
@@ -190,6 +182,58 @@ fn parse_container_from_cgroup(cgroup_path: &str) -> Option<ContainerInfo> {
     }
 
     None
+}
+
+/// Docker's default data root; each container's config.v2.json has its name.
+const DOCKER_ROOT: &str = "/var/lib/docker";
+/// Podman's default storage root for rootful containers.
+const PODMAN_ROOT: &str = "/var/lib/containers/storage";
+
+/// Look up a container's name in its runtime's on-disk state. Called once
+/// per container cgroup (results are cached by path); None falls back to
+/// the short ID, e.g. for non-default data roots or containerd.
+fn container_name(runtime: ContainerRuntime, id: &str, cgroup_path: &str) -> Option<String> {
+    match runtime {
+        ContainerRuntime::Docker => {
+            let config = fs::read_to_string(format!("{DOCKER_ROOT}/containers/{id}/config.v2.json")).ok()?;
+            docker_name(&config)
+        }
+        ContainerRuntime::Podman => {
+            let root = match rootless_uid(cgroup_path) {
+                Some(uid) => nix::unistd::User::from_uid(nix::unistd::Uid::from_raw(uid))
+                    .ok()
+                    .flatten()?
+                    .dir
+                    .join(".local/share/containers/storage"),
+                None => PODMAN_ROOT.into(),
+            };
+            let containers = fs::read_to_string(root.join("overlay-containers/containers.json")).ok()?;
+            podman_name(&containers, id)
+        }
+        _ => None,
+    }
+}
+
+/// `"Name": "/web"` in Docker's config.v2.json.
+fn docker_name(config_json: &str) -> Option<String> {
+    let config: serde_json::Value = serde_json::from_str(config_json).ok()?;
+    let name = config.get("Name")?.as_str()?.trim_start_matches('/');
+    (!name.is_empty()).then(|| name.to_string())
+}
+
+/// First name of the container with `id` in podman's containers.json.
+fn podman_name(containers_json: &str, id: &str) -> Option<String> {
+    let containers: Vec<serde_json::Value> = serde_json::from_str(containers_json).ok()?;
+    let container = containers.iter().find(|c| c.get("id").and_then(|v| v.as_str()) == Some(id))?;
+    container.get("names")?.get(0)?.as_str().map(str::to_string)
+}
+
+/// Rootless podman containers live under the user's systemd manager:
+/// .../user@<uid>.service/.../libpod-<id>.scope
+fn rootless_uid(cgroup_path: &str) -> Option<u32> {
+    cgroup_path
+        .split('/')
+        .find_map(|seg| seg.strip_prefix("user@")?.strip_suffix(".service")?.parse().ok())
 }
 
 fn extract_scope_id(path: &str, prefix: &str) -> Option<String> {
@@ -236,5 +280,38 @@ fn short_id(id: &str) -> String {
         id[..12].to_string()
     } else {
         id.to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn docker_name_from_config() {
+        assert_eq!(docker_name(r#"{"ID":"abc","Name":"/web","State":{}}"#).as_deref(), Some("web"));
+        assert_eq!(docker_name(r#"{"Name":""}"#), None);
+        assert_eq!(docker_name("not json"), None);
+    }
+
+    #[test]
+    fn podman_name_from_containers_json() {
+        let json = r#"[{"id":"aaa","names":["db"]},{"id":"bbb","names":["web","alias"]}]"#;
+        assert_eq!(podman_name(json, "bbb").as_deref(), Some("web"));
+        assert_eq!(podman_name(json, "ccc"), None);
+    }
+
+    #[test]
+    fn rootless_uid_from_cgroup() {
+        let path = "/user.slice/user-1000.slice/user@1000.service/user.slice/libpod-abc.scope";
+        assert_eq!(rootless_uid(path), Some(1000));
+        assert_eq!(rootless_uid("/machine.slice/libpod-abc.scope"), None);
+    }
+
+    #[test]
+    fn conmon_scope_maps_to_container() {
+        let info = parse_container_from_cgroup("/machine.slice/libpod-conmon-0123456789abcdef.scope").unwrap();
+        assert_eq!(info.runtime, ContainerRuntime::Podman);
+        assert_eq!(info.name, "0123456789ab");
     }
 }
