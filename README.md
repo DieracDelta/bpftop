@@ -20,9 +20,11 @@ I worked closely with claude-code while building this. Claude has touched many p
 # THE BESPOKE ASF FEATURES
 
 - BLAZINGLY FAST because the heavy lifting is done kernel-sid3
-- Container aware (docker+podman) for each process
+- Container aware (docker+podman) for each process, shown by container name
 - Shows which systemd unit (`.service`, `.slice`, `.scope`) owns a process — useful when you have 15 things all named `python3`
 - Per-process network I/O tracking via fexit hooks on tcp/udp (IPv4 + IPv6) send/recv, with a kprobe fallback for older kernels (`N` to toggle). Still in eBPF land, so no syscall overhead here either!
+- Per-process disk I/O: storage read/write rates and IOPS (read+write syscalls/s) from the kernel's I/O accounting, read by the same BPF walk (`D` to toggle)
+- Threads view (`H`), with per-thread state and CPU
 - NVIDIA GPU usage per process (VRAM+%used)
 - Cgroup v2 freeze/thaw — freeze entire services or containers atomically (press `f`). This is OP!!
 - Vim keybindings, folding, visual mode, first class support for yank to clipboard that works in tmux
