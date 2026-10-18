@@ -75,6 +75,8 @@ struct signal_struct {
 
 struct task_struct {
 	unsigned int __state;
+	unsigned int flags;
+	int exit_state;
 	int prio;
 	int static_prio;
 	struct mm_struct *mm;

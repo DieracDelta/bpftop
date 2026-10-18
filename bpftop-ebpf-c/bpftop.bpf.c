@@ -14,6 +14,7 @@ typedef long long __s64;
 #include <bpf/bpf_tracing.h>
 
 #define NULL ((void *)0)
+#define PF_KTHREAD 0x00200000
 
 struct task_info {
 	u32 pid;
@@ -21,8 +22,8 @@ struct task_info {
 	u32 ppid;
 	u32 euid;
 	u32 ruid;
-	u8 state;
-	u8 _pad[3];
+	/* __state | exit_state: raw kernel TASK_* / EXIT_* bits */
+	u32 state;
 	u64 utime_ns;
 	u64 stime_ns;
 	u64 vsize_pages;
@@ -39,7 +40,8 @@ struct task_info {
 	u32 net_ifindex;
 	u32 nr_threads;
 	u8 frozen;
-	u8 _pad2[7];
+	u8 kthread;
+	u8 _pad2[6];
 };
 
 /* Emitted for non-leader threads, so userspace can sum a process's CPU
@@ -159,7 +161,8 @@ int dump_task(struct bpf_iter__task *ctx)
 		info.ruid = cred->uid.val;
 	}
 
-	info.state = (u8)task->__state;
+	info.state = task->__state | (u32)task->exit_state;
+	info.kthread = (task->flags & PF_KTHREAD) != 0;
 	/* Leader's own time plus that of already-exited threads, which the
 	 * kernel folds into signal_struct. Live threads arrive as thread_cpu. */
 	info.utime_ns = task->utime + dead_utime;

@@ -39,7 +39,7 @@ pub struct ProcessInfo {
     pub children: Vec<u32>,
     /// Previous utime+stime for delta calculation.
     pub prev_cpu_ns: u64,
-    /// Whether this is a kernel thread (ppid=2 or pid=2).
+    /// Whether this is a kernel thread (PF_KTHREAD).
     pub is_kernel_thread: bool,
     /// Whether this is a user thread (tid != pid).
     pub is_thread: bool,
@@ -64,6 +64,7 @@ pub enum ProcessState {
     Stopped,
     TracingStop,
     Dead,
+    Parked,
     Idle,
     Unknown,
 }
@@ -84,15 +85,32 @@ impl ProcessState {
         }
     }
 
-    pub fn from_kernel_state(state: u8) -> Self {
-        // Kernel task states are bitmask values
-        match state {
+    /// Decode `__state | exit_state` the way the kernel does for /proc
+    /// (`__task_state_index`): mask to the reportable bits, special-case
+    /// TASK_IDLE and rtlock waits, then take the highest set bit.
+    pub fn from_kernel_state(state: u32) -> Self {
+        const TASK_UNINTERRUPTIBLE: u32 = 0x2;
+        const TASK_NOLOAD: u32 = 0x400;
+        const TASK_RTLOCK_WAIT: u32 = 0x1000;
+        const TASK_REPORT: u32 = 0x7f;
+
+        if state & (TASK_UNINTERRUPTIBLE | TASK_NOLOAD) == TASK_UNINTERRUPTIBLE | TASK_NOLOAD {
+            return Self::Idle;
+        }
+        if state & TASK_RTLOCK_WAIT != 0 {
+            return Self::DiskSleep;
+        }
+        match state & TASK_REPORT {
             0 => Self::Running,
-            1 => Self::Sleeping,
-            2 => Self::DiskSleep,
-            4 => Self::Zombie,
-            8 => Self::Stopped,
-            _ => Self::Unknown,
+            s => match 31 - s.leading_zeros() {
+                0 => Self::Sleeping,     // TASK_INTERRUPTIBLE
+                1 => Self::DiskSleep,    // TASK_UNINTERRUPTIBLE
+                2 => Self::Stopped,      // __TASK_STOPPED
+                3 => Self::TracingStop,  // __TASK_TRACED
+                4 => Self::Dead,         // EXIT_DEAD
+                5 => Self::Zombie,       // EXIT_ZOMBIE
+                _ => Self::Parked,       // TASK_PARKED
+            },
         }
     }
 
@@ -105,6 +123,7 @@ impl ProcessState {
             Self::Stopped => 'T',
             Self::TracingStop => 't',
             Self::Dead => 'X',
+            Self::Parked => 'P',
             Self::Idle => 'I',
             Self::Unknown => '?',
         }
@@ -427,6 +446,21 @@ mod tests {
             frozen: false,
             tree_prefix: String::new(),
         }
+    }
+
+    #[test]
+    fn kernel_state_decoding() {
+        let s = ProcessState::from_kernel_state;
+        assert_eq!(s(0x0), ProcessState::Running);
+        assert_eq!(s(0x1), ProcessState::Sleeping);
+        assert_eq!(s(0x2), ProcessState::DiskSleep);
+        assert_eq!(s(0x102), ProcessState::DiskSleep); // TASK_KILLABLE
+        assert_eq!(s(0x402), ProcessState::Idle); // TASK_IDLE
+        assert_eq!(s(0x104), ProcessState::Stopped); // TASK_STOPPED (with WAKEKILL)
+        assert_eq!(s(0x8), ProcessState::TracingStop);
+        assert_eq!(s(0x80 | 0x20), ProcessState::Zombie); // TASK_DEAD | EXIT_ZOMBIE
+        assert_eq!(s(0x40), ProcessState::Parked);
+        assert_eq!(s(0x1000 | 0x2), ProcessState::DiskSleep); // rtlock wait
     }
 
     #[test]

@@ -13,9 +13,8 @@ pub struct TaskInfo {
     pub euid: u32,
     /// Real user ID
     pub ruid: u32,
-    /// Process state (0=running, 1=sleeping, 2=disk_sleep, 4=zombie, 8=stopped)
-    pub state: u8,
-    pub _pad: [u8; 3],
+    /// `__state | exit_state`: the kernel's raw TASK_*/EXIT_* bits.
+    pub state: u32,
     /// User CPU time in nanoseconds: the leader's plus exited threads'.
     /// Live threads' time arrives separately as `ThreadCpu` records.
     pub utime_ns: u64,
@@ -47,7 +46,9 @@ pub struct TaskInfo {
     pub nr_threads: u32,
     /// Value of the task's cgroup `cgroup.freeze` (0 or 1).
     pub frozen: u8,
-    pub _pad2: [u8; 7],
+    /// 1 if the task has PF_KTHREAD set.
+    pub kthread: u8,
+    pub _pad2: [u8; 6],
 }
 
 /// CPU time of one live non-leader thread, emitted by the task iterator in

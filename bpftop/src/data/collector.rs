@@ -196,7 +196,7 @@ impl Collector {
         let mut user_threads = 0u32;
         let mut kernel_threads = 0u32;
         for task in bpf_tasks {
-            let is_kthread = task.ppid == 2 || task.pid == 2;
+            let is_kthread = task.kthread != 0;
             if is_kthread {
                 kernel_threads += task.nr_threads.max(1);
             } else {
@@ -272,7 +272,7 @@ impl Collector {
                 .or_insert_with(|| Text::from(resolve_username(task.ruid)))
                 .clone();
 
-            let is_kernel_thread = task.ppid == 2 || task.pid == 2;
+            let is_kernel_thread = task.kthread != 0;
 
             // cmdline: prefer BPF CMDLINE_MAP, fall back to comm. Only hit
             // the map when the entry's generation differs from the cached one.
