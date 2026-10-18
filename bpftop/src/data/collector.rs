@@ -1,4 +1,6 @@
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
@@ -57,6 +59,8 @@ pub struct Collector {
     gpu_collector: Option<GpuCollector>,
     #[allow(dead_code)]
     pub last_timings: CollectTimings,
+    /// Set by the UI while threads are shown; thread rows are only built then.
+    show_threads: Arc<AtomicBool>,
 }
 
 impl Collector {
@@ -105,6 +109,7 @@ impl Collector {
             #[cfg(feature = "gpu")]
             gpu_collector: GpuCollector::try_new(),
             last_timings: CollectTimings::default(),
+            show_threads: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -130,7 +135,13 @@ impl Collector {
             #[cfg(feature = "gpu")]
             gpu_collector: None,
             last_timings: CollectTimings::default(),
+            show_threads: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    /// Shared switch for building per-thread rows (off by default).
+    pub fn show_threads_flag(&self) -> Arc<AtomicBool> {
+        self.show_threads.clone()
     }
 
     /// Collect all system and process data for one refresh cycle.
@@ -218,6 +229,18 @@ impl Collector {
         let total_sys_delta = cpu_total
             .total_ticks()
             .saturating_sub(self.prev_cpu_total.total_ticks());
+        // cpu% (Irix mode, 0-100% per core) = delta_ns / per-core wall ns * 100.
+        // total_sys_delta is aggregate USER_HZ (100) ticks across all cores, so
+        // per-core wall time in ns = total_sys_delta / num_cpus * (1e9 / 100).
+        let num_cpus = cpus.len().max(1) as f64;
+        let wall_delta_ns = total_sys_delta as f64 * 1_000_000_000.0 / 100.0 / num_cpus;
+        let cpu_percent_of = |delta_ns: u64| {
+            if wall_delta_ns > 0.0 {
+                delta_ns as f64 / wall_delta_ns * 100.0
+            } else {
+                0.0
+            }
+        };
 
         for task in bpf_tasks {
             let state = ProcessState::from_kernel_state(task.state);
@@ -236,26 +259,7 @@ impl Collector {
                 .get(&task.pid)
                 .copied()
                 .unwrap_or(total_cpu_ns);
-            let cpu_delta_ns = total_cpu_ns.saturating_sub(prev_cpu_ns);
-
-            // Convert ns delta to fraction of total CPU time
-            // total_sys_delta is in jiffies (clock ticks), so convert
-            // cpu_delta_ns to jiffies: ns / (1e9 / CLK_TCK) = ns * CLK_TCK / 1e9
-            // But it's simpler to keep everything relative:
-            // cpu% = (delta_ns / delta_wall_ns) * 100
-            // We approximate wall time delta from system ticks:
-            // wall_ns ≈ total_sys_delta * (1e9 / CLK_TCK) / num_cpus
-            let num_cpus = cpus.len().max(1) as f64;
-            let cpu_percent = if total_sys_delta > 0 {
-                // total_sys_delta is aggregate ticks across all cores.
-                // Per-core wall time in ns = total_sys_delta / num_cpus * (1e9 / CLK_TCK)
-                // cpu% (Irix mode, 0-100% per core) = delta_ns / wall_ns * 100
-                let wall_delta_ns =
-                    total_sys_delta as f64 * 1_000_000_000.0 / 100.0 / num_cpus;
-                (cpu_delta_ns as f64 / wall_delta_ns) * 100.0
-            } else {
-                0.0
-            };
+            let cpu_percent = cpu_percent_of(total_cpu_ns.saturating_sub(prev_cpu_ns));
 
             let res_bytes = task.rss_pages * self.page_size;
             let shr_bytes = task.shmem_pages * self.page_size;
@@ -366,6 +370,36 @@ impl Collector {
         }
 
         self.cmdline_cache = cmdline_cache;
+
+        // Thread rows, while the UI shows threads. A thread shares its
+        // process's user, memory, cgroup and cmdline (like htop); only
+        // identity, state, name and CPU are its own. pid = tid keeps rows
+        // unique; ppid = the process nests threads under it in tree view.
+        if self.show_threads.load(Ordering::Relaxed) {
+            let leader_idx: HashMap<u32, usize> =
+                processes.iter().enumerate().map(|(i, p)| (p.pid, i)).collect();
+            let mut thread_rows = Vec::with_capacity(records.threads.len());
+            for t in &records.threads {
+                let Some(&i) = leader_idx.get(&t.pid) else { continue };
+                let prev = self.prev_proc_times.get(&t.tid).copied().unwrap_or(t.cpu_ns);
+                let mut row = processes[i].clone();
+                row.pid = t.tid;
+                row.ppid = t.pid;
+                row.tid = t.tid;
+                row.is_thread = true;
+                row.state = ProcessState::from_kernel_state(t.state);
+                row.comm = Text::from(comm_to_string(&t.comm));
+                row.cpu_percent = cpu_percent_of(t.cpu_ns.saturating_sub(prev));
+                row.cpu_time_secs = t.cpu_ns as f64 / 1_000_000_000.0;
+                row.prev_cpu_ns = t.cpu_ns;
+                row.net_rx_bytes = 0;
+                row.net_tx_bytes = 0;
+                row.net_rate = 0.0;
+                row.net_ifname = self.no_ifname.clone();
+                thread_rows.push(row);
+            }
+            processes.extend(thread_rows);
+        }
         lap(&mut timings.per_process);
 
         // GPU data
@@ -395,7 +429,7 @@ impl Collector {
 
         let child_map: Vec<(u32, u32)> = processes
             .iter()
-            .filter(|p| p.ppid != 0 && p.ppid != p.pid)
+            .filter(|p| p.ppid != 0 && p.ppid != p.pid && !p.is_thread)
             .map(|p| (p.ppid, p.pid))
             .collect();
 

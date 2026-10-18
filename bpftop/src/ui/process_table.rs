@@ -169,7 +169,11 @@ impl<'a> ProcessTableWidget<'a> {
             }
         };
 
-        let style = Style::default().fg(fg).bg(bg);
+        let mut style = Style::default().fg(fg).bg(bg);
+        if proc.is_thread {
+            // Threads are dimmed, like htop's thread color.
+            style = style.add_modifier(Modifier::DIM);
+        }
 
         // Fill background
         for x in area.x..area.x + area.width {

@@ -195,11 +195,7 @@ fn handle_normal_key(app: &mut App, key: KeyEvent) -> bool {
         }
 
         // Toggle threads
-        KeyCode::Char('H') => {
-            app.show_threads = !app.show_threads;
-
-            app.update_filtered_processes();
-        }
+        KeyCode::Char('H') => app.toggle_threads(),
         KeyCode::Char('K') => {
             app.show_kernel_threads = !app.show_kernel_threads;
 

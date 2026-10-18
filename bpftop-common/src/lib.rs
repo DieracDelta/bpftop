@@ -16,7 +16,7 @@ pub struct TaskInfo {
     /// `__state | exit_state`: the kernel's raw TASK_*/EXIT_* bits.
     pub state: u32,
     /// Scheduler runtime (`se.sum_exec_runtime`) in ns: the leader's plus
-    /// exited threads'. Live threads' time arrives as `ThreadCpu` records.
+    /// exited threads'. Live threads' time arrives as `ThreadRec` records.
     pub cpu_ns: u64,
     /// Virtual memory size in pages (mm->total_vm)
     pub vsize_pages: u64,
@@ -49,15 +49,22 @@ pub struct TaskInfo {
     pub _pad2: [u8; 6],
 }
 
-/// CPU time of one live non-leader thread, emitted by the task iterator in
-/// place of a full `TaskInfo`. Shares the `pid`/`tid` prefix with
-/// `TaskInfo`; `tid != pid` is what distinguishes the two in the stream.
+/// One live non-leader thread, emitted by the task iterator in place of a
+/// full `TaskInfo` (everything else is shared with its process). Shares
+/// the `pid`/`tid` prefix with `TaskInfo`; `tid != pid` is what
+/// distinguishes the two in the stream.
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
-pub struct ThreadCpu {
+pub struct ThreadRec {
     pub pid: u32,
     pub tid: u32,
+    /// Scheduler runtime (`se.sum_exec_runtime`) in ns.
     pub cpu_ns: u64,
+    /// `__state | exit_state`, as in `TaskInfo::state`.
+    pub state: u32,
+    pub _pad: u32,
+    /// Thread name, null-terminated
+    pub comm: [u8; 16],
 }
 
 /// Command line event captured by sched_process_exec tracepoint.
@@ -88,19 +95,21 @@ pub struct NetStats {
 // Keep in sync with bpftop-ebpf-c/bpftop.bpf.c (asserted on both sides).
 const _: () = assert!(core::mem::size_of::<TaskInfo>() == 136);
 const _: () = assert!(core::mem::size_of::<CmdlineEvent>() == 280);
-const _: () = assert!(core::mem::size_of::<ThreadCpu>() == 16);
+const _: () = assert!(core::mem::size_of::<ThreadRec>() == 40);
 
 /// Parsed output of one task iterator walk.
 #[derive(Debug, Default)]
 pub struct IterRecords {
     /// One per thread-group leader.
     pub tasks: Vec<TaskInfo>,
+    /// One per live non-leader thread.
+    pub threads: Vec<ThreadRec>,
     /// tgid → summed CPU ns of the group's live non-leader threads.
     pub thread_cpu_ns: std::collections::HashMap<u32, u64>,
     pub thread_records: usize,
 }
 
-/// Split the iterator's mixed `TaskInfo`/`ThreadCpu` stream. Returns the
+/// Split the iterator's mixed `TaskInfo`/`ThreadRec` stream. Returns the
 /// byte offset of the first truncated record on error.
 pub fn parse_iter_records(buf: &[u8]) -> Result<IterRecords, usize> {
     use core::mem::size_of;
@@ -122,14 +131,15 @@ pub fn parse_iter_records(buf: &[u8]) -> Result<IterRecords, usize> {
             out.tasks.push(unsafe { core::ptr::read_unaligned(rest.as_ptr() as *const TaskInfo) });
             off += size_of::<TaskInfo>();
         } else {
-            if rest.len() < size_of::<ThreadCpu>() {
+            if rest.len() < size_of::<ThreadRec>() {
                 return Err(off);
             }
-            // SAFETY: length checked; ThreadCpu is plain old data.
-            let t = unsafe { core::ptr::read_unaligned(rest.as_ptr() as *const ThreadCpu) };
+            // SAFETY: length checked; ThreadRec is plain old data.
+            let t = unsafe { core::ptr::read_unaligned(rest.as_ptr() as *const ThreadRec) };
             *out.thread_cpu_ns.entry(t.pid).or_default() += t.cpu_ns;
             out.thread_records += 1;
-            off += size_of::<ThreadCpu>();
+            out.threads.push(t);
+            off += size_of::<ThreadRec>();
         }
     }
     Ok(out)
@@ -159,20 +169,25 @@ mod tests {
         t
     }
 
+    fn thread(pid: u32, tid: u32, cpu_ns: u64) -> ThreadRec {
+        ThreadRec { pid, tid, cpu_ns, state: 0, _pad: 0, comm: [0; 16] }
+    }
+
     #[test]
     fn parses_mixed_leader_and_thread_records() {
         let mut buf = Vec::new();
         // Threads may arrive before or after their leader.
-        buf.extend(bytes(&ThreadCpu { pid: 10, tid: 12, cpu_ns: 5 }));
+        buf.extend(bytes(&thread(10, 12, 5)));
         buf.extend(bytes(&leader(10)));
         buf.extend(bytes(&leader(20)));
-        buf.extend(bytes(&ThreadCpu { pid: 10, tid: 11, cpu_ns: 7 }));
+        buf.extend(bytes(&thread(10, 11, 7)));
 
         let r = parse_iter_records(&buf).unwrap();
         assert_eq!(r.tasks.iter().map(|t| t.pid).collect::<Vec<_>>(), vec![10, 20]);
         assert_eq!(r.thread_cpu_ns.get(&10), Some(&12));
         assert_eq!(r.thread_cpu_ns.get(&20), None);
         assert_eq!(r.thread_records, 2);
+        assert_eq!(r.threads.iter().map(|t| t.tid).collect::<Vec<_>>(), vec![12, 11]);
     }
 
     #[test]
@@ -180,8 +195,8 @@ mod tests {
         let full = bytes(&leader(10));
         assert_eq!(parse_iter_records(&full[..100]).unwrap_err(), 0);
 
-        let mut buf = bytes(&ThreadCpu { pid: 1, tid: 2, cpu_ns: 3 });
+        let mut buf = bytes(&thread(1, 2, 3));
         buf.extend_from_slice(&[0; 4]);
-        assert_eq!(parse_iter_records(&buf).unwrap_err(), 16);
+        assert_eq!(parse_iter_records(&buf).unwrap_err(), 40);
     }
 }

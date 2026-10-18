@@ -56,6 +56,10 @@ struct Cli {
     /// pid, user, frozen, net_tx, net_rx, net_if, cpu_percent, cmdline
     #[arg(long)]
     dump: bool,
+
+    /// Also build per-thread rows (as when threads are shown in the UI)
+    #[arg(long)]
+    threads: bool,
 }
 
 #[derive(Serialize)]
@@ -114,6 +118,9 @@ fn main() -> Result<()> {
         return Ok(());
     }
     let mut collector = Collector::new(loader);
+    collector
+        .show_threads_flag()
+        .store(cli.threads, std::sync::atomic::Ordering::Relaxed);
     std::thread::sleep(Duration::from_millis(cli.settle_ms));
 
     eprintln!("BPF loaded. Running {} warmup iterations...", cli.warmup);

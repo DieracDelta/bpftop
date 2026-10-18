@@ -134,6 +134,8 @@ pub struct App {
 
     // Data collection
     collector: Collector,
+    /// Tells the collector to build per-thread rows.
+    threads_flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
     ebpf_loaded: bool,
     pub ebpf_error: Option<String>,
 }
@@ -164,6 +166,8 @@ impl App {
         };
         let ebpf_loaded = ebpf.is_loaded();
         let collector = Collector::new(ebpf);
+        let threads_flag = collector.show_threads_flag();
+        threads_flag.store(show_threads, std::sync::atomic::Ordering::Relaxed);
 
         Self {
             mode: AppMode::Normal,
@@ -204,6 +208,7 @@ impl App {
             table_width: 0,
             dirty: true,
             collector,
+            threads_flag,
             ebpf_loaded,
             ebpf_error,
         }
@@ -554,6 +559,13 @@ impl App {
             self.selected = self.filtered_processes.len() - 1;
         }
         self.adjust_scroll();
+    }
+
+    pub fn toggle_threads(&mut self) {
+        self.show_threads = !self.show_threads;
+        self.threads_flag
+            .store(self.show_threads, std::sync::atomic::Ordering::Relaxed);
+        self.update_filtered_processes();
     }
 
     pub fn toggle_tag(&mut self) {

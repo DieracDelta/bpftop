@@ -44,13 +44,16 @@ struct task_info {
 	u8 _pad2[6];
 };
 
-/* Emitted for non-leader threads, so userspace can sum a process's CPU
- * time across its live threads. tid != pid distinguishes it from a
- * task_info record (whose tid == pid) in the iterator stream. */
-struct thread_cpu {
+/* Emitted for non-leader threads: enough to sum a process's CPU time
+ * across its live threads and to list threads. tid != pid distinguishes
+ * it from a task_info record (whose tid == pid) in the iterator stream. */
+struct thread_rec {
 	u32 pid;
 	u32 tid;
 	u64 cpu_ns;
+	u32 state;
+	u32 _pad;
+	char comm[16];
 };
 
 struct cmdline_event {
@@ -67,7 +70,7 @@ struct cmdline_event {
 /* Keep in sync with bpftop-common/src/lib.rs (asserted on both sides). */
 _Static_assert(sizeof(struct task_info) == 136, "task_info ABI");
 _Static_assert(sizeof(struct cmdline_event) == 280, "cmdline_event ABI");
-_Static_assert(sizeof(struct thread_cpu) == 16, "thread_cpu ABI");
+_Static_assert(sizeof(struct thread_rec) == 40, "thread_rec ABI");
 
 struct net_stats {
 	u64 tx_bytes;
@@ -140,15 +143,17 @@ int dump_task(struct bpf_iter__task *ctx)
 	info.pid = (u32)task->tgid;
 	info.tid = (u32)task->pid;
 
-	/* Full records for thread-group leaders only; other threads just
-	 * contribute their CPU time. */
+	/* Full records for thread-group leaders only; other threads get a
+	 * small record (the rest is inherited from the process). */
 	if (info.tid != info.pid) {
-		struct thread_cpu tc = {
+		struct thread_rec tr = {
 			.pid = info.pid,
 			.tid = info.tid,
 			.cpu_ns = task->se.sum_exec_runtime,
+			.state = task->__state | (u32)task->exit_state,
 		};
-		bpf_seq_write(ctx->meta->seq, &tc, sizeof(tc));
+		bpf_probe_read_kernel(&tr.comm, sizeof(tr.comm), &task->comm);
+		bpf_seq_write(ctx->meta->seq, &tr, sizeof(tr));
 		return 0;
 	}
 
@@ -173,7 +178,7 @@ int dump_task(struct bpf_iter__task *ctx)
 	info.kthread = (task->flags & PF_KTHREAD) != 0;
 	/* Scheduler runtime (ns-accurate, unlike tick-sampled utime/stime):
 	 * the leader's own plus that of already-exited threads, which the
-	 * kernel folds into signal_struct. Live threads arrive as thread_cpu. */
+	 * kernel folds into signal_struct. Live threads arrive as thread_rec. */
 	info.cpu_ns = task->se.sum_exec_runtime + dead_runtime;
 	info.prio = task->prio;
 	info.static_prio = task->static_prio;
