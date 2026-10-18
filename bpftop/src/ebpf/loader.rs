@@ -173,12 +173,7 @@ impl EbpfLoader {
         let len = (event.len as usize).min(event.cmdline.len());
         let raw = &event.cmdline[..len];
         // cmdline uses NUL as separator between args; replace with spaces
-        let s: String = raw
-            .iter()
-            .map(|&b| if b == 0 { ' ' } else { b as char })
-            .collect::<String>()
-            .trim()
-            .to_string();
+        let s = String::from_utf8_lossy(raw).replace('\0', " ").trim().to_string();
         if s.is_empty() {
             None
         } else {

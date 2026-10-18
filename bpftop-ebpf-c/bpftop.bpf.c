@@ -214,9 +214,15 @@ int capture_cmdline(void *ctx)
 	if (len > 255)
 		len = 255;
 
-	long ret = bpf_probe_read_user_str(event.cmdline, len, (const void *)arg_start);
-	if (ret > 0)
-		event.len = ret;
+	/* argv is NUL-separated, so a _str read would stop after argv[0].
+	 * Copy the raw bytes; userspace turns the NULs into spaces. */
+	if (bpf_probe_read_user(event.cmdline, len, (const void *)arg_start) == 0) {
+		event.len = len;
+	} else {
+		long ret = bpf_probe_read_user_str(event.cmdline, len, (const void *)arg_start);
+		if (ret > 0)
+			event.len = ret;
+	}
 
 	bpf_map_update_elem(&CMDLINE_MAP, &pid, &event, BPF_ANY);
 	return 0;
