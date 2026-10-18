@@ -25,7 +25,7 @@ struct task_info {
 	u8 _pad[3];
 	u64 utime_ns;
 	u64 stime_ns;
-	u64 vsize_bytes;
+	u64 vsize_pages;
 	u64 rss_pages;
 	u64 start_time_ns;
 	char comm[16];
@@ -92,24 +92,30 @@ struct {
 	__type(value, u64);
 } RECV_SOCK_STASH SEC(".maps");
 
+/*
+ * The iterator's task is a trusted BTF pointer, so fields are read with
+ * plain (CO-RE relocated) loads rather than a bpf_probe_read_kernel call
+ * each; pointers reached from it are loaded with fault-safe PROBE_MEM
+ * semantics by the verifier.
+ */
 static __always_inline void read_cgroup(struct task_struct *task, struct task_info *info)
 {
-	struct css_set *css = BPF_CORE_READ(task, cgroups);
+	struct css_set *css = task->cgroups;
 	if (!css)
 		return;
 
-	struct cgroup *cgrp = BPF_CORE_READ(css, dfl_cgrp);
+	struct cgroup *cgrp = css->dfl_cgrp;
 	if (!cgrp)
 		return;
 
 	/* Same value userspace would read from <cgroup>/cgroup.freeze. */
-	info->frozen = BPF_CORE_READ(cgrp, freezer.freeze);
+	info->frozen = cgrp->freezer.freeze;
 
-	struct kernfs_node *kn = BPF_CORE_READ(cgrp, kn);
+	struct kernfs_node *kn = cgrp->kn;
 	if (!kn)
 		return;
 
-	info->cgroup_id = BPF_CORE_READ(kn, id);
+	info->cgroup_id = kn->id;
 }
 
 SEC("iter/task")
@@ -120,8 +126,8 @@ int dump_task(struct bpf_iter__task *ctx)
 		return 1;
 
 	struct task_info info = {};
-	info.pid = (u32)BPF_CORE_READ(task, tgid);
-	info.tid = (u32)BPF_CORE_READ(task, pid);
+	info.pid = (u32)task->tgid;
+	info.tid = (u32)task->pid;
 
 	/* Full records for thread-group leaders only; other threads just
 	 * contribute their CPU time. */
@@ -129,48 +135,53 @@ int dump_task(struct bpf_iter__task *ctx)
 		struct thread_cpu tc = {
 			.pid = info.pid,
 			.tid = info.tid,
-			.cpu_ns = BPF_CORE_READ(task, utime) + BPF_CORE_READ(task, stime),
+			.cpu_ns = task->utime + task->stime,
 		};
 		bpf_seq_write(ctx->meta->seq, &tc, sizeof(tc));
 		return 0;
 	}
 
-	struct signal_struct *sig = BPF_CORE_READ(task, signal);
-	info.nr_threads = BPF_CORE_READ(sig, nr_threads);
-
-	struct task_struct *parent = BPF_CORE_READ(task, real_parent);
-	if (parent)
-		info.ppid = (u32)BPF_CORE_READ(parent, tgid);
-
-	const struct cred *cred = BPF_CORE_READ(task, cred);
-	if (cred) {
-		info.euid = BPF_CORE_READ(cred, euid.val);
-		info.ruid = BPF_CORE_READ(cred, uid.val);
+	struct signal_struct *sig = task->signal;
+	u64 dead_utime = 0, dead_stime = 0;
+	if (sig) {
+		info.nr_threads = sig->nr_threads;
+		dead_utime = sig->utime;
+		dead_stime = sig->stime;
 	}
 
-	info.state = (u8)BPF_CORE_READ(task, __state);
+	struct task_struct *parent = task->real_parent;
+	if (parent)
+		info.ppid = (u32)parent->tgid;
+
+	const struct cred *cred = task->cred;
+	if (cred) {
+		info.euid = cred->euid.val;
+		info.ruid = cred->uid.val;
+	}
+
+	info.state = (u8)task->__state;
 	/* Leader's own time plus that of already-exited threads, which the
 	 * kernel folds into signal_struct. Live threads arrive as thread_cpu. */
-	info.utime_ns = BPF_CORE_READ(task, utime) + BPF_CORE_READ(sig, utime);
-	info.stime_ns = BPF_CORE_READ(task, stime) + BPF_CORE_READ(sig, stime);
-	info.prio = BPF_CORE_READ(task, prio);
-	info.static_prio = BPF_CORE_READ(task, static_prio);
+	info.utime_ns = task->utime + dead_utime;
+	info.stime_ns = task->stime + dead_stime;
+	info.prio = task->prio;
+	info.static_prio = task->static_prio;
 
-	struct mm_struct *mm = BPF_CORE_READ(task, mm);
+	struct mm_struct *mm = task->mm;
 	if (mm) {
-		s64 file_count = BPF_CORE_READ(mm, rss_stat[0].count);
-		s64 anon_count = BPF_CORE_READ(mm, rss_stat[1].count);
-		s64 shmem_count = BPF_CORE_READ(mm, rss_stat[3].count);
+		s64 file_count = mm->rss_stat[0].count;
+		s64 anon_count = mm->rss_stat[1].count;
+		s64 shmem_count = mm->rss_stat[3].count;
 
-		info.vsize_bytes = BPF_CORE_READ(mm, total_vm) * 4096;
+		info.vsize_pages = mm->total_vm;
 		info.rss_pages =
 			(u64)(file_count > 0 ? file_count : 0) +
 			(u64)(anon_count > 0 ? anon_count : 0);
 		info.shmem_pages = (u64)(shmem_count > 0 ? shmem_count : 0);
 	}
 
-	info.start_time_ns = BPF_CORE_READ(task, start_time);
-	BPF_CORE_READ_INTO(&info.comm, task, comm);
+	info.start_time_ns = task->start_time;
+	bpf_probe_read_kernel(&info.comm, sizeof(info.comm), &task->comm);
 	read_cgroup(task, &info);
 
 	/* Join the per-process maps here so userspace needs no per-PID

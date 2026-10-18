@@ -320,7 +320,7 @@ impl Collector {
                 state,
                 priority,
                 nice,
-                virt_bytes: task.vsize_bytes,
+                virt_bytes: task.vsize_pages * self.page_size,
                 res_bytes,
                 shr_bytes,
                 cpu_percent,

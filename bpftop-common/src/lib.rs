@@ -24,8 +24,8 @@ pub struct TaskInfo {
     pub utime_ns: u64,
     /// System CPU time in nanoseconds (same scope as `utime_ns`)
     pub stime_ns: u64,
-    /// Virtual memory size in bytes
-    pub vsize_bytes: u64,
+    /// Virtual memory size in pages (mm->total_vm)
+    pub vsize_pages: u64,
     /// Resident set size in pages
     pub rss_pages: u64,
     /// Process start time in nanoseconds (boot-relative)
