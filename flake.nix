@@ -216,25 +216,51 @@
                 "threading.Thread(target=lambda: any(iter(int, 1)), daemon=True).start()\n"
                 "time.sleep(1e9)' marker-busythread"
             )
+            # IPv6 UDP: native ::1 traffic plus a v4-mapped send from a v6
+            # socket (udpv6_sendmsg delegates to udp_sendmsg), which must be
+            # counted once: tx stays within one iteration of rx.
+            machine.succeed(
+                "systemd-run --unit=udp6 ${pkgs.python3}/bin/python3 -c "
+                "'#marker-udp6\n"
+                "import socket,time\n"
+                "r6=socket.socket(socket.AF_INET6,socket.SOCK_DGRAM); r6.bind((\"::1\",0))\n"
+                "r4=socket.socket(socket.AF_INET,socket.SOCK_DGRAM); r4.bind((\"127.0.0.1\",0))\n"
+                "s=socket.socket(socket.AF_INET6,socket.SOCK_DGRAM)\n"
+                "m=(\"::ffff:127.0.0.1\",r4.getsockname()[1])\n"
+                "while True:\n"
+                " s.sendto(b\"x\"*100,r6.getsockname()); r6.recv(200)\n"
+                " s.sendto(b\"y\"*100,m); r4.recv(200); time.sleep(0.2)'"
+            )
             machine.succeed("systemd-run --unit=freezeme ${pkgs.coreutils}/bin/sleep 100001")
-            machine.wait_until_succeeds("systemctl is-active freezeme threadexit")
+            machine.wait_until_succeeds("systemctl is-active freezeme threadexit udp6")
             machine.succeed("echo 1 > /sys/fs/cgroup/system.slice/freezeme.service/cgroup.freeze")
             # Execs after BPF loads (during --settle-ms): cmdline comes from the exec tracepoint.
             machine.succeed("systemd-run --unit=execer ${pkgs.bash}/bin/bash -c '${pkgs.coreutils}/bin/sleep 10; exec ${pkgs.python3}/bin/python3 -c \"import time; time.sleep(1e9)\" marker-exec'")
             dump = machine.succeed("bench --dump --settle-ms 15000 --warmup 1 --iterations 1 --interval-ms 1000 | tee /tmp/results/dump.tsv")
-            rows = [l.split("\t", 7) for l in dump.splitlines() if l.count("\t") >= 7]
-            def find(marker):
+            def parse(dump):
+                return [l.split("\t", 7) for l in dump.splitlines() if l.count("\t") >= 7]
+            def find(rows, marker):
                 hits = [r for r in rows if marker in r[7]]
                 assert hits, f"no process with cmdline containing {marker!r}"
                 return hits[0]
-            r = find("marker-threadexit")
+            def check_net(rows, mode):
+                r = find(rows, "marker-threadexit")
+                assert int(r[3]) > 0 and int(r[4]) > 0 and r[5] == "lo", f"net ({mode}): {r}"
+                r = find(rows, "marker-udp6")
+                tx, rx = int(r[3]), int(r[4])
+                assert tx >= 1000 and abs(tx - rx) <= 200, f"udp6 ({mode}): {r}"
+            rows = parse(dump)
+            r = find(rows, "marker-threadexit")
             assert r[1] == "bench3", f"user: {r}"
-            assert int(r[3]) > 0 and int(r[4]) > 0 and r[5] == "lo", f"net: {r}"
-            assert find("sleep 100001")[2] == "1", "freezeme should be frozen"
-            assert find("marker-exec")[2] == "0"
+            check_net(rows, "fexit")
+            assert find(rows, "sleep 100001")[2] == "1", "freezeme should be frozen"
+            assert find(rows, "marker-exec")[2] == "0"
             # CPU% must include non-leader threads (was leader-only).
-            assert float(find("marker-busythread")[6]) > 50, find("marker-busythread")
+            assert float(find(rows, "marker-busythread")[6]) > 50, find(rows, "marker-busythread")
             assert sum(r[2] == "1" for r in rows) == 1, "only freezeme is frozen"
+            # Same accounting through the kprobe fallback.
+            kdump = machine.succeed("BPFTOP_NET_PROBES=kprobe bench --dump --settle-ms 5000 --warmup 0 --iterations 1 | tee /tmp/results/dump_kprobe.tsv")
+            check_net(parse(kdump), "kprobe")
             machine.succeed("echo 0 > /sys/fs/cgroup/system.slice/freezeme.service/cgroup.freeze")
 
             # ── Network probe overhead on other processes ────────────
@@ -245,7 +271,9 @@
                 env = "--setenv=BPFTOP_NET_PROBES=kprobe" if mode == "kprobe" else ""
                 machine.succeed(f"systemd-run --unit=hold-{mode} {env} $(command -v bench) --hold 600")
                 machine.wait_until_succeeds(f"journalctl -u hold-{mode} | grep -q holding")
-                print(machine.succeed(f"journalctl -u hold-{mode} | grep holding"))
+                line = machine.succeed(f"journalctl -u hold-{mode} | grep holding")
+                print(line)
+                assert ("FExit" if mode == "fexit" else "KProbe") in line, line
                 netbench(mode)
                 machine.succeed(f"systemctl stop hold-{mode}")
             netbench("none2")

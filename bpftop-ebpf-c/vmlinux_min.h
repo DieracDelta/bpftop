@@ -99,6 +99,7 @@ struct dst_entry {
 };
 
 struct sock_common {
+	unsigned short skc_family;
 	int skc_bound_dev_if;
 };
 

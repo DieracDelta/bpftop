@@ -23,22 +23,50 @@ static BPF_OBJ: &[u8] =
 /// PAGE_SIZE << 3 bytes, so each read() asks for at least that much.
 const ITER_READ_CHUNK: usize = 64 * 1024;
 
-/// Kernel functions traced for per-process network bytes, with the
-/// fexit program and the kprobe/kretprobe pair that implement each.
-const NET_PROBES: &[(&str, &str, Option<&str>)] = &[
-    ("tcp_sendmsg", "kprobe_tcp_sendmsg", None),
-    ("udp_sendmsg", "kprobe_udp_sendmsg", None),
-    ("tcp_recvmsg", "kprobe_tcp_recvmsg", Some("kretprobe_tcp_recvmsg")),
-    ("udp_recvmsg", "kprobe_udp_recvmsg", Some("kretprobe_udp_recvmsg")),
+/// A kernel function traced for per-process network bytes. It's
+/// accounted by `fexit_<func>` where the kernel supports it, else by the
+/// kprobe (and optional kretprobe) programs.
+struct NetProbe {
+    func: &'static str,
+    kprobe: &'static str,
+    kretprobe: Option<&'static str>,
+    /// The IPv6 UDP functions are optional (e.g. ipv6.disable=1).
+    required: bool,
+}
+
+const NET_PROBES: &[NetProbe] = &[
+    NetProbe { func: "tcp_sendmsg", kprobe: "kprobe_tcp_sendmsg", kretprobe: None, required: true },
+    NetProbe { func: "udp_sendmsg", kprobe: "kprobe_udp_sendmsg", kretprobe: None, required: true },
+    NetProbe { func: "udpv6_sendmsg", kprobe: "kprobe_udpv6_sendmsg", kretprobe: None, required: false },
+    NetProbe {
+        func: "tcp_recvmsg",
+        kprobe: "kprobe_tcp_recvmsg",
+        kretprobe: Some("kretprobe_tcp_recvmsg"),
+        required: true,
+    },
+    NetProbe {
+        func: "udp_recvmsg",
+        kprobe: "kprobe_udp_recvmsg",
+        kretprobe: Some("kretprobe_udp_recvmsg"),
+        required: true,
+    },
+    NetProbe {
+        func: "udpv6_recvmsg",
+        kprobe: "kprobe_udpv6_recvmsg",
+        kretprobe: Some("kretprobe_udpv6_recvmsg"),
+        required: false,
+    },
 ];
 
-/// How the network accounting programs are attached.
+/// How the network accounting programs ended up attached.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NetProbeMode {
     /// BPF trampolines (5.17+; arm64 6.0+). Cheapest per send/recv.
     FExit,
     /// kprobe + kretprobe fallback for kernels without fexit support.
     KProbe,
+    /// fexit for some functions, kprobes for others.
+    Mixed,
 }
 
 /// Manages eBPF program loading, attachment, and data retrieval.
@@ -88,22 +116,10 @@ impl EbpfLoader {
             .context("attaching cleanup_cmdline")?;
 
         // Network accounting: fexit where the kernel supports it, else
-        // kprobes. BPFTOP_NET_PROBES=kprobe forces the fallback.
+        // kprobes, chosen per function. Each function is accounted by
+        // exactly one mechanism. BPFTOP_NET_PROBES=kprobe forces kprobes.
         let force_kprobe = std::env::var("BPFTOP_NET_PROBES").is_ok_and(|v| v == "kprobe");
-        let fexit = if force_kprobe {
-            Err(anyhow::anyhow!("disabled by BPFTOP_NET_PROBES=kprobe"))
-        } else {
-            attach_net_fexit(&mut bpf, &btf)
-        };
-        let net_probe_mode = match fexit {
-            Ok(()) => NetProbeMode::FExit,
-            Err(e) => {
-                log::info!("fexit network probes unavailable ({e:#}); using kprobes");
-                unload_net_fexit(&mut bpf);
-                attach_net_kprobes(&mut bpf)?;
-                NetProbeMode::KProbe
-            }
-        };
+        let net_probe_mode = attach_net_probes(&mut bpf, &btf, force_kprobe)?;
 
         Ok(Self {
             bpf: Some(bpf),
@@ -212,49 +228,88 @@ impl EbpfLoader {
     }
 }
 
-fn attach_net_fexit(bpf: &mut Ebpf, btf: &Btf) -> Result<()> {
-    // Load (verify) all programs before attaching any, so a failure
-    // can't leave a mix of fexit and kprobe accounting the same calls.
-    for &(func, _, _) in NET_PROBES {
-        let name = format!("fexit_{func}");
-        let prog: &mut FExit = bpf
-            .program_mut(&name)
-            .with_context(|| format!("{name} not found"))?
+fn attach_net_probes(bpf: &mut Ebpf, btf: &Btf, force_kprobe: bool) -> Result<NetProbeMode> {
+    let (mut fexit, mut kprobe) = (0, 0);
+    for probe in NET_PROBES {
+        let via_fexit = if force_kprobe {
+            Err(anyhow::anyhow!("disabled by BPFTOP_NET_PROBES=kprobe"))
+        } else {
+            attach_fexit(bpf, btf, probe.func)
+        };
+        let err = match via_fexit {
+            Ok(()) => {
+                fexit += 1;
+                continue;
+            }
+            Err(e) => e,
+        };
+        match attach_kprobes(bpf, probe) {
+            Ok(()) => {
+                log::info!("{}: fexit unavailable ({err:#}); using kprobes", probe.func);
+                kprobe += 1;
+            }
+            Err(e) if !probe.required => {
+                log::info!("{}: not traced ({e:#})", probe.func);
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(match (fexit, kprobe) {
+        (_, 0) => NetProbeMode::FExit,
+        (0, _) => NetProbeMode::KProbe,
+        _ => NetProbeMode::Mixed,
+    })
+}
+
+/// Load and attach `fexit_<func>`, unloading it again on failure.
+fn attach_fexit(bpf: &mut Ebpf, btf: &Btf, func: &str) -> Result<()> {
+    let name = format!("fexit_{func}");
+    let prog: &mut FExit = bpf
+        .program_mut(&name)
+        .with_context(|| format!("{name} not found"))?
+        .try_into()
+        .with_context(|| format!("{name} is not an FExit"))?;
+    let result = prog
+        .load(func, btf)
+        .with_context(|| format!("loading {name}"))
+        .and_then(|()| prog.attach().map(drop).with_context(|| format!("attaching {name}")));
+    if result.is_err() {
+        let _ = prog.unload();
+    }
+    result
+}
+
+/// Attach the kprobe (and kretprobe, if any) for one function. Partial
+/// attachment is undone so an entry probe never runs without its return
+/// probe draining RECV_SOCK_STASH.
+fn attach_kprobes(bpf: &mut Ebpf, probe: &NetProbe) -> Result<()> {
+    let mut attached = Vec::new();
+    for prog_name in std::iter::once(probe.kprobe).chain(probe.kretprobe) {
+        let prog: &mut KProbe = bpf
+            .program_mut(prog_name)
+            .with_context(|| format!("{prog_name} not found"))?
             .try_into()
-            .with_context(|| format!("{name} is not an FExit"))?;
-        prog.load(func, btf).with_context(|| format!("loading {name}"))?;
-    }
-    for &(func, _, _) in NET_PROBES {
-        let name = format!("fexit_{func}");
-        let prog: &mut FExit = bpf.program_mut(&name).unwrap().try_into()?;
-        prog.attach().with_context(|| format!("attaching {name}"))?;
-    }
-    Ok(())
-}
-
-fn unload_net_fexit(bpf: &mut Ebpf) {
-    for &(func, _, _) in NET_PROBES {
-        let prog: Option<&mut FExit> = bpf
-            .program_mut(&format!("fexit_{func}"))
-            .and_then(|p| p.try_into().ok());
-        if let Some(prog) = prog {
+            .with_context(|| format!("{prog_name} is not a KProbe"))?;
+        let result = prog
+            .load()
+            .with_context(|| format!("loading {prog_name}"))
+            .and_then(|()| {
+                prog.attach(probe.func, 0)
+                    .map(drop)
+                    .with_context(|| format!("attaching {prog_name} to {}", probe.func))
+            });
+        if let Err(e) = result {
             let _ = prog.unload();
+            for done in attached {
+                let prog: Option<&mut KProbe> =
+                    bpf.program_mut(done).and_then(|p| p.try_into().ok());
+                if let Some(prog) = prog {
+                    let _ = prog.unload();
+                }
+            }
+            return Err(e);
         }
-    }
-}
-
-fn attach_net_kprobes(bpf: &mut Ebpf) -> Result<()> {
-    for &(func, entry, ret) in NET_PROBES {
-        for prog_name in std::iter::once(entry).chain(ret) {
-            let prog: &mut KProbe = bpf
-                .program_mut(prog_name)
-                .with_context(|| format!("{prog_name} not found"))?
-                .try_into()
-                .with_context(|| format!("{prog_name} is not a KProbe"))?;
-            prog.load().with_context(|| format!("loading {prog_name}"))?;
-            prog.attach(func, 0)
-                .with_context(|| format!("attaching {prog_name}"))?;
-        }
+        attached.push(prog_name);
     }
     Ok(())
 }

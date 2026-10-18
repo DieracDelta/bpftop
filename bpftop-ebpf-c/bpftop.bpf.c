@@ -329,6 +329,15 @@ static __always_inline struct sock *pop_recv_sock(u64 pid_tgid)
 	return (struct sock *)sk;
 }
 
+#define AF_INET6 10
+
+/* udpv6_sendmsg hands v4-mapped destinations to udp_sendmsg; those bytes
+ * are counted by the udpv6 probe, so the udp_sendmsg probes skip v6 sockets. */
+static __always_inline bool is_inet6(struct sock *sk)
+{
+	return BPF_CORE_READ(sk, __sk_common.skc_family) == AF_INET6;
+}
+
 SEC("kprobe/tcp_sendmsg")
 int kprobe_tcp_sendmsg(struct pt_regs *ctx)
 {
@@ -341,6 +350,17 @@ int kprobe_tcp_sendmsg(struct pt_regs *ctx)
 
 SEC("kprobe/udp_sendmsg")
 int kprobe_udp_sendmsg(struct pt_regs *ctx)
+{
+	struct sock *sk = (struct sock *)PT_REGS_PARM1(ctx);
+	u64 size = PT_REGS_PARM3(ctx);
+
+	if (!is_inet6(sk))
+		account_tx(size, sk);
+	return 0;
+}
+
+SEC("kprobe/udpv6_sendmsg")
+int kprobe_udpv6_sendmsg(struct pt_regs *ctx)
 {
 	struct sock *sk = (struct sock *)PT_REGS_PARM1(ctx);
 	u64 size = PT_REGS_PARM3(ctx);
@@ -387,6 +407,25 @@ int kretprobe_udp_recvmsg(struct pt_regs *ctx)
 	return 0;
 }
 
+SEC("kprobe/udpv6_recvmsg")
+int kprobe_udpv6_recvmsg(struct pt_regs *ctx)
+{
+	stash_recv_sock((struct sock *)PT_REGS_PARM1(ctx));
+	return 0;
+}
+
+SEC("kretprobe/udpv6_recvmsg")
+int kretprobe_udpv6_recvmsg(struct pt_regs *ctx)
+{
+	u64 pid_tgid = bpf_get_current_pid_tgid();
+	struct sock *sk = pop_recv_sock(pid_tgid);
+	s32 ret = PT_REGS_RC(ctx);
+
+	if (ret > 0)
+		account_rx(ret, sk);
+	return 0;
+}
+
 /*
  * fexit variants of the probes above, preferred by the loader. One BPF
  * trampoline call per send/recv instead of kprobe + kretprobe, no
@@ -418,6 +457,16 @@ int BPF_PROG(fexit_udp_sendmsg, struct sock *sk)
 {
 	int ret = func_ret(ctx);
 
+	if (ret > 0 && !is_inet6(sk))
+		account_tx(ret, sk);
+	return 0;
+}
+
+SEC("fexit/udpv6_sendmsg")
+int BPF_PROG(fexit_udpv6_sendmsg, struct sock *sk)
+{
+	int ret = func_ret(ctx);
+
 	if (ret > 0)
 		account_tx(ret, sk);
 	return 0;
@@ -435,6 +484,16 @@ int BPF_PROG(fexit_tcp_recvmsg, struct sock *sk)
 
 SEC("fexit/udp_recvmsg")
 int BPF_PROG(fexit_udp_recvmsg, struct sock *sk)
+{
+	int ret = func_ret(ctx);
+
+	if (ret > 0)
+		account_rx(ret, sk);
+	return 0;
+}
+
+SEC("fexit/udpv6_recvmsg")
+int BPF_PROG(fexit_udpv6_recvmsg, struct sock *sk)
 {
 	int ret = func_ret(ctx);
 
