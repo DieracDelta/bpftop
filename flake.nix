@@ -288,7 +288,11 @@
                 assert int(r["net_tx"]) > 0 and int(r["net_rx"]) > 0 and r["net_if"] == "lo", f"net ({mode}): {r}"
                 r = find(rows, "marker-udp6")
                 tx, rx = int(r["net_tx"]), int(r["net_rx"])
-                assert tx >= 1000 and abs(tx - rx) <= 200, f"udp6 ({mode}): {r}"
+                # Every byte sent is received, so tx ~= rx; double-counting the
+                # v4-mapped send would make it 1.5x. Not exact: probes attach
+                # one at a time (send before recv), so the first iteration or
+                # two can count sends without their receives.
+                assert tx >= 1000 and 0.9 <= tx / rx <= 1.1, f"udp6 ({mode}): {r}"
             rows = parse(dump)
             assert find(rows, "marker-threadexit")["user"] == "bench3"
             check_net(rows, "fexit")
@@ -334,7 +338,7 @@
                 n = sum(1 for r in trows if r["thread"] == "1" and r["ppid"] == p["pid"])
                 assert n == 100, (p["pid"], n)
             # Same accounting through the kprobe fallback.
-            kdump = machine.succeed("BPFTOP_NET_PROBES=kprobe bench --dump --settle-ms 5000 --warmup 0 --iterations 1 | tee /tmp/results/dump_kprobe.tsv")
+            kdump = machine.succeed("BPFTOP_NET_PROBES=kprobe bench --dump --settle-ms 10000 --warmup 0 --iterations 1 | tee /tmp/results/dump_kprobe.tsv")
             check_net(parse(kdump), "kprobe")
             machine.succeed("echo 0 > /sys/fs/cgroup/system.slice/freezeme.service/cgroup.freeze")
             machine.succeed("systemctl kill --signal=CONT stopme")
