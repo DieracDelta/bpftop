@@ -7,7 +7,7 @@ BPFtop is htop, but eBPF. We use BPF iterators to walk the kernel task list dire
 
 htop does ~4 file reads per process *per* refresh cycle. It scales linearly -- O(n)! So, you're screwed if you have a lot of PIDs, and keep opening htop willy nilly and forget to close them. Htop ends up as one of the things eating up many instructions. As AFAIU the other process monitors like btm or btop also have this issue.
 
-BUT life doesn't HAVE to be this way in the year of 2026! bpftop does one BPF iterator walk + 4 constant `/proc` reads regardless of process count. So, O(1) syscall count. Fast as fuck! BIG MONEY!!!
+BUT life doesn't HAVE to be this way in the year of 2026! bpftop does one BPF iterator walk + 4 constant `/proc` reads regardless of process count. So, ~100 syscalls per refresh whether you have 1.5k processes or 11k (htop: 70k to 350k). Fast as fuck! BIG MONEY!!!
 
 Here's a (somewhat dated) demo.
 
@@ -139,7 +139,20 @@ htop inspired this.
 
 # Performance
 
-bpftop does one BPF iterator walk + one read of each of 4 `/proc` files per refresh. The per-process extras (cmdlines, network bytes, cgroup freeze state) are joined in-kernel by the iterator and usernames are cached, so a steady-state refresh is a few dozen syscalls whatever the process count. htop does ~4 file reads per process. And so, syscall count scales linearly with process count for htop, but stays flat for bpftop.
+bpftop does one BPF iterator walk + one read of each of 4 `/proc` files per refresh. The per-process extras (cmdlines, network bytes, disk I/O, cgroup freeze state) are joined in-kernel by the iterator and usernames are cached. htop does ~4 file reads per process. And so, syscall count scales linearly with process count for htop, but stays flat for bpftop.
+
+Measured on a Ryzen 9 5950X (32 threads), Linux 7.2.8, with htop 3.5.3. Both tools ran as their full TUI in the same 200x50 terminal, refreshing every 100ms with default configs, against N extra `sleep` processes. Numbers are per refresh (collecting + drawing), CPU is user+sys, median of 5:
+
+| Processes | htop syscalls | bpftop syscalls | htop CPU ms | bpftop CPU ms | bpftop is |
+|---:|---:|---:|---:|---:|---:|
+| 1,487 | 70,887 | 76 | 184.1 | 20.8 | 8.8x cheaper |
+| 1,883 | 80,744 | 97 | 244.5 | 20.1 | 12.2x cheaper |
+| 2,476 | 95,574 | 166 | 300.8 | 14.5 | 20.8x cheaper |
+| 3,491 | 122,752 | 184 | 283.6 | 17.5 | 16.2x cheaper |
+| 6,371 | 211,439 | 80 | 467.6 | 29.5 | 15.9x cheaper |
+| 11,333 | 353,711 | 123 | 948.3 | 47.6 | 19.9x cheaper |
+
+At 11k processes htop needs ~0.95s of CPU per refresh, so it can't actually keep up with a 100ms refresh rate. bpftop's CPU still grows with process count (the kernel walks every task, and the UI handles every row), just much more slowly. Its syscalls wobble between ~75 and ~185: the BPF iterator hands back output in 32 KB `read`s (31 of them at 1.5k processes, 76 at 11k), and the 2.5k/3.5k runs include a cgroupfs re-walk because something on the machine created a cgroup mid-run. bpftop's numbers include NVIDIA GPU sampling (~3ms per refresh here), which htop doesn't do.
 
 ![Syscall Scaling](bench/results/syscall_scaling.png)
 
@@ -150,10 +163,9 @@ bpftop does one BPF iterator walk + one read of each of 4 `/proc` files per refr
 ## Reproducing the benchmarks
 
 ```bash
-nix develop
-cargo xtask build-ebpf && cargo build --release --bin bench
-sudo env "PATH=$PATH" bash bench/run.sh   # SCALES="100 1000" K=20 REPS=5 to override
-python3 bench/plot.py
+nix build .#bench-run -o result-bench-run
+sudo ./result-bench-run/bin/bpftop-bench-run   # SCALES="100 1000" K=20 REPS=5 to override
+nix develop -c python3 bench/plot.py           # charts + the table above
 ```
 
-Both tools are measured the same way: one run with 1 refresh and one with 1+K refreshes, and the difference divided by K is the per-refresh cost, so startup (BPF load for bpftop) and htop's delay between refreshes cancel out. `strace -c` counts syscalls; CPU time is user+sys from `wait4`. See `bench/run.sh` for details.
+Each tool runs once for 1 refresh and once for 1+K refreshes (`-n`); the difference divided by K is the per-refresh cost, so startup (BPF load and cmdline seeding for bpftop) cancels out. `strace -c` counts syscalls; CPU time is user+sys from `wait4`. Results land in `bench/results/`. See `bench/run.sh` for details.

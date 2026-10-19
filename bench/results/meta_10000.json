@@ -1,0 +1,11 @@
+{
+    "scale": 10000,
+    "actual_procs": 11333,
+    "actual_tasks": 14548,
+    "extra_refreshes": 20,
+    "cpu_reps": 5,
+    "kernel": "7.2.8",
+    "cpu": "AMD Ryzen 9 5950X 16-Core Processor",
+    "nproc": 32,
+    "timestamp": "2026-10-18T21:14:58-04:00"
+}
