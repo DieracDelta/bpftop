@@ -160,10 +160,10 @@ fn main() -> Result<()> {
     }
 
     if cli.dump {
-        println!("pid\tppid\tuser\tstate\tthread\tkthread\tfrozen\tcpu\tnet_tx\tnet_rx\tnet_if\tio_read\tio_write\tiops\tcontainer\tcomm\tcmdline");
+        println!("pid\tppid\tuser\tstate\tthread\tkthread\tfrozen\tres\tshr\tcpu\tnet_tx\tnet_rx\tnet_if\tio_read\tio_write\tiops\tcontainer\tcomm\tcmdline");
         for p in &last_procs {
             println!(
-                "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{:.1}\t{}\t{}\t{}\t{:.0}\t{:.0}\t{:.0}\t{}\t{}\t{}",
+                "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{:.1}\t{}\t{}\t{}\t{:.0}\t{:.0}\t{:.0}\t{}\t{}\t{}",
                 p.pid,
                 p.ppid,
                 p.user,
@@ -171,6 +171,8 @@ fn main() -> Result<()> {
                 p.is_thread as u8,
                 p.is_kernel_thread as u8,
                 p.frozen as u8,
+                p.res_bytes,
+                p.shr_bytes,
                 p.cpu_percent,
                 p.net_tx_bytes,
                 p.net_rx_bytes,

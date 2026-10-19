@@ -306,6 +306,13 @@
             parent = find(rows, "marker-zombieparent")
             zombies = [r for r in rows if r["ppid"] == parent["pid"]]
             assert [z["state"] for z in zombies] == ["Z"], zombies
+            # SHR is statm's "shared" (file + shmem pages), like htop. RES/SHR
+            # are approximate (per-CPU counter batching), so allow 8 MiB.
+            for pid in ["1", find(rows, "sleep 100001")["pid"]]:
+                r = next(r for r in rows if r["pid"] == pid)
+                statm = machine.succeed(f"cat /proc/{pid}/statm").split()
+                shared = int(statm[2]) * 4096
+                assert shared > 0 and abs(int(r["shr"]) - shared) <= 8 << 20, (pid, r["shr"], shared)
             unknown = [r for r in rows if r["state"] == "?"]
             assert not unknown, unknown
             kthreads = [r for r in rows if r["kthread"] == "1"]
