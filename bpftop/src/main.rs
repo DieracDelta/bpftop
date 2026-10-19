@@ -24,6 +24,10 @@ struct Cli {
     /// Filter processes by user
     #[arg(short = 'u', long)]
     user: Option<String>,
+
+    /// Exit after this many refreshes (like htop -n; used by bench/run.sh)
+    #[arg(short = 'n', long)]
+    max_iterations: Option<u64>,
 }
 
 fn main() -> Result<()> {
@@ -46,6 +50,7 @@ fn main() -> Result<()> {
     if let Some(user) = cli.user {
         app.user_filter = Some(user);
     }
+    app.max_iterations = cli.max_iterations;
 
     app.run()
 }

@@ -2,18 +2,20 @@
 # Benchmark bpftop vs htop: syscalls and CPU time per refresh, at varying
 # process counts.
 #
-# Both tools are measured the same way: one run with 1 refresh and one
-# with 1+K refreshes. The difference divided by K is the per-refresh cost,
-# which cancels out startup (BPF load and BTF parsing for bpftop, init for
-# htop) and htop's sleep between refreshes.
+# Both tools run the same way: the real TUI in a pseudo-terminal of the
+# same size, refreshing every 100ms, with default configs, once for 1
+# refresh and once for 1+K refreshes (-n). The difference divided by K is
+# the per-refresh cost (collecting + drawing), which cancels out startup
+# (BPF load and BTF parsing for bpftop, init for htop).
 #
-# Usage: sudo bash bench/run.sh
-# Knobs (env): SCALES="100 1000" K=20 REPS=5 BENCH_BIN=... RESULTS_DIR=...
+# Usage: sudo bash bench/run.sh   (or: nix build .#bench-run; sudo ./result/bin/bpftop-bench-run)
+# Knobs (env): SCALES="100 1000" K=20 REPS=5 BPFTOP_BIN=... BENCH_BIN=... RESULTS_DIR=...
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RESULTS_DIR="${RESULTS_DIR:-$SCRIPT_DIR/results}"
+BPFTOP_BIN="${BPFTOP_BIN:-$SCRIPT_DIR/../target/release/bpftop}"
 BENCH_BIN="${BENCH_BIN:-$SCRIPT_DIR/../target/release/bench}"
 CPUTIME="python3 $SCRIPT_DIR/cputime.py"
 read -ra SCALES <<< "${SCALES:-100 500 1000 2000 5000 10000}"
@@ -56,19 +58,19 @@ kill_dummies() {
 
 trap kill_dummies EXIT
 
-# Command line doing N refreshes.
-bpftop_cmd() { echo "$BENCH_BIN --iterations $1 --warmup 0"; }
+# Command line doing N refreshes, 100ms apart.
+bpftop_cmd() { echo "$BPFTOP_BIN -d 100 -n $1"; }
 htop_cmd() { echo "htop -d 1 -n $1"; }
 
-# Run a command; htop needs a terminal, so it gets a pseudo-terminal.
-run_as() {
-    local tool=$1; shift
-    if [ "$tool" = htop ]; then
-        script -qfec "$*" /dev/null > /dev/null
-    else
-        "$@" > /dev/null 2>&1
-    fi
+# Run a command in a 200x50 pseudo-terminal. Both tools get the same size
+# so they draw the same amount.
+run_tui() {
+    script -qfec "stty cols 200 rows 50; $*" /dev/null > /dev/null
 }
+
+# Default configs for both tools (no ~/.config/htop or ~/.config/bpftop).
+HOME=$(mktemp -d)
+export HOME TERM=xterm-256color
 
 # ── Preflight checks ────────────────────────────────────────────
 
@@ -77,11 +79,13 @@ if [ "$(id -u)" -ne 0 ]; then
     exit 1
 fi
 
-if [ ! -x "$BENCH_BIN" ]; then
-    echo "ERROR: bench binary not found at $BENCH_BIN" >&2
-    echo "  Build it first: cargo build --release --bin bench" >&2
-    exit 1
-fi
+for bin in "$BPFTOP_BIN" "$BENCH_BIN"; do
+    if [ ! -x "$bin" ]; then
+        echo "ERROR: $bin not found" >&2
+        echo "  Build it first: cargo build --release --bin bpftop --bin bench" >&2
+        exit 1
+    fi
+done
 
 for cmd in strace htop script python3; do
     command -v "$cmd" >/dev/null || { echo "ERROR: $cmd not found" >&2; exit 1; }
@@ -108,11 +112,11 @@ for N in "${SCALES[@]}"; do
             cmd=$("${tool}_cmd" "$refreshes")
 
             log "$tool: $refreshes refresh(es), strace"
-            run_as "$tool" strace -f -c -S calls -o "$RESULTS_DIR/${tool}_strace_${N}_${label}.txt" $cmd
+            run_tui strace -f -c -S calls -o "$RESULTS_DIR/${tool}_strace_${N}_${label}.txt" $cmd
 
             log "$tool: $refreshes refresh(es), CPU time x$REPS"
             for ((r = 0; r < REPS; r++)); do
-                run_as "$tool" $CPUTIME "$cpu_file" "$label" $cmd
+                run_tui $CPUTIME "$cpu_file" "$label" $cmd
             done
         done
     done
@@ -130,6 +134,8 @@ for N in "${SCALES[@]}"; do
     "extra_refreshes": $K,
     "cpu_reps": $REPS,
     "kernel": "$(uname -r)",
+    "cpu": "$(grep -m1 'model name' /proc/cpuinfo | cut -d: -f2 | xargs)",
+    "nproc": $(nproc),
     "timestamp": "$(date -Iseconds)"
 }
 METAEOF
@@ -137,6 +143,11 @@ METAEOF
     kill_dummies
     log "Scale $N complete."
 done
+
+# Hand the results back to the invoking user.
+if [ -n "${SUDO_UID:-}" ]; then
+    chown -R "$SUDO_UID:$SUDO_GID" "$RESULTS_DIR"
+fi
 
 log ""
 log "All benchmarks complete. Results in $RESULTS_DIR/"

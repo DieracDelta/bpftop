@@ -224,6 +224,22 @@ def plot_syscall_breakdown(results_dir, output_dir, scales):
     print(f"  Saved {out}")
 
 
+def print_summary(results_dir, scales):
+    """Markdown table of per-refresh syscalls and CPU time (for the README)."""
+    print("| Processes | htop syscalls | bpftop syscalls | htop CPU ms | bpftop CPU ms | CPU ratio |")
+    print("|---:|---:|---:|---:|---:|---:|")
+    for n in scales:
+        meta = load_meta(results_dir, n)
+        k = meta["extra_refreshes"]
+        sys_h = sum(per_refresh_syscalls(results_dir, "htop", n, k).values())
+        sys_b = sum(per_refresh_syscalls(results_dir, "bpftop", n, k).values())
+        cpu_h = per_refresh_cpu_ms(results_dir, "htop", n, k)
+        cpu_b = per_refresh_cpu_ms(results_dir, "bpftop", n, k)
+        ratio = f"{cpu_h / cpu_b:.1f}x" if cpu_h and cpu_b else "-"
+        fmt = lambda v: f"{v:.2f}" if v is not None else "-"
+        print(f"| {meta['actual_procs']} | {sys_h:,.0f} | {sys_b:,.0f} | {fmt(cpu_h)} | {fmt(cpu_b)} | {ratio} |")
+
+
 def main():
     parser = argparse.ArgumentParser(description="Generate benchmark graphs")
     parser.add_argument(
@@ -252,7 +268,8 @@ def main():
     plot_syscall_scaling(results_dir, output_dir, scales)
     plot_cpu_time(results_dir, output_dir, scales)
     plot_syscall_breakdown(results_dir, output_dir, scales)
-    print("Done.")
+    print()
+    print_summary(results_dir, scales)
     return 0
 
 

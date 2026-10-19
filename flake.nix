@@ -124,6 +124,18 @@
             bins = [ "bpftop" "bench" ];
           };
 
+          # bench/run.sh with pinned tools: sudo ./result/bin/bpftop-bench-run
+          # Results go to ./bench/results (run it from the repo root).
+          bench-run = pkgs.writeShellScriptBin "bpftop-bench-run" ''
+            export PATH=${pkgs.lib.makeBinPath (with pkgs; [
+              bash coreutils findutils gnugrep gawk procps util-linux htop strace python3
+            ])}
+            export BPFTOP_BIN=''${BPFTOP_BIN:-${self.packages.${system}.bench}/bin/bpftop}
+            export BENCH_BIN=''${BENCH_BIN:-${self.packages.${system}.bench}/bin/bench}
+            export RESULTS_DIR=''${RESULTS_DIR:-$PWD/bench/results}
+            exec bash ${./bench}/run.sh "$@"
+          '';
+
           static = mkBpftop {
             pname = "bpftop-static";
             rustToolchain = pkgs.rust-bin.stable.latest.default.override {
@@ -338,7 +350,7 @@
 
             # ── bench/run.sh end to end at one small scale ───────────
             machine.succeed(
-                "SCALES=100 K=5 REPS=2 BENCH_BIN=$(command -v bench) RESULTS_DIR=/tmp/results/runsh "
+                "SCALES=100 K=5 REPS=2 BPFTOP_BIN=$(command -v bpftop) BENCH_BIN=$(command -v bench) RESULTS_DIR=/tmp/results/runsh "
                 "bash ${./bench}/run.sh >&2"
             )
             print(machine.succeed("cd /tmp/results/runsh && ls && cat meta_100.json *_cpu_100.txt"))

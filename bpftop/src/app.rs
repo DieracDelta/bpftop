@@ -133,6 +133,10 @@ pub struct App {
     // Redraw control
     pub dirty: bool,
 
+    /// Exit once this many refreshes have been drawn (`-n`).
+    pub max_iterations: Option<u64>,
+    refreshes: u64,
+
     // Data collection
     collector: Collector,
     /// Tells the collector to build per-thread rows.
@@ -209,6 +213,8 @@ impl App {
             header_height: 4,
             table_width: 0,
             dirty: true,
+            max_iterations: None,
+            refreshes: 0,
             collector,
             threads_flag,
             ebpf_loaded,
@@ -292,6 +298,9 @@ impl App {
             if self.dirty {
                 terminal.draw(|frame| self.draw(frame))?;
                 self.dirty = false;
+            }
+            if self.max_iterations.is_some_and(|n| self.refreshes >= n) {
+                return Ok(());
             }
 
             // Sleep until a message arrives or the flash message expires.
@@ -445,6 +454,7 @@ impl App {
     }
 
     fn merge_data(&mut self, sys_info: SystemInfo, processes: Vec<ProcessInfo>) {
+        self.refreshes += 1;
         self.sys_info = sys_info;
 
         let new_map: HashMap<u32, ProcessInfo> =
