@@ -40,7 +40,7 @@ struct task_info {
 	char comm[16];
 	s32 prio;
 	s32 static_prio;
-	u64 shmem_pages;
+	u64 shared_pages;
 	u64 cgroup_id;
 	u64 cmdline_gen;
 	u64 net_tx_bytes;
@@ -220,7 +220,10 @@ int dump_task(struct bpf_iter__task *ctx)
 		info.rss_pages =
 			(u64)(file_count > 0 ? file_count : 0) +
 			(u64)(anon_count > 0 ? anon_count : 0);
-		info.shmem_pages = (u64)(shmem_count > 0 ? shmem_count : 0);
+		/* Like statm's "shared" (htop's SHR): file-backed + shmem. */
+		info.shared_pages =
+			(u64)(file_count > 0 ? file_count : 0) +
+			(u64)(shmem_count > 0 ? shmem_count : 0);
 	}
 
 	info.start_time_ns = task->start_time;

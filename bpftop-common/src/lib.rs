@@ -51,8 +51,8 @@ pub struct TaskInfo {
     pub prio: i32,
     /// Static priority (nice = static_prio - 120)
     pub static_prio: i32,
-    /// Shared memory pages (from mm_rss_stat MM_SHMEMPAGES)
-    pub shmem_pages: u64,
+    /// Shared pages: file-backed + shmem (statm "shared", htop's SHR)
+    pub shared_pages: u64,
     /// Cgroup inode ID for container detection
     pub cgroup_id: u64,
     /// `CmdlineEvent::gen` of this PID's CMDLINE_MAP entry, 0 if none.

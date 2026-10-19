@@ -268,7 +268,7 @@ impl Collector {
             let cpu_percent = cpu_percent_of(total_cpu_ns.saturating_sub(prev_cpu_ns));
 
             let res_bytes = task.rss_pages * self.page_size;
-            let shr_bytes = task.shmem_pages * self.page_size;
+            let shr_bytes = task.shared_pages * self.page_size;
             let mem_percent = if memory.total > 0 {
                 res_bytes as f64 / memory.total as f64 * 100.0
             } else {
