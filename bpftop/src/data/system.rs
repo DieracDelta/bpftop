@@ -6,6 +6,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 
+use super::cpuset::{CpuSet, Partition};
 use super::gpu::GpuDeviceInfo;
 
 /// System-wide information: CPU, memory, swap, load, uptime.
@@ -25,6 +26,10 @@ pub struct SystemInfo {
     #[allow(dead_code)]
     pub sleeping_tasks: u32,
     pub gpus: Vec<GpuDeviceInfo>,
+    /// CPUs reserved by cpuset partitions or isolcpus.
+    pub reserved_cpus: CpuSet,
+    /// The partitions reserving them.
+    pub partitions: Vec<Partition>,
 }
 
 /// Per-CPU tick counters from /proc/stat.
@@ -110,13 +115,13 @@ impl SwapInfo {
 
 /// A stat file kept open across refreshes and re-read with pread from
 /// offset 0: one syscall per refresh instead of open/statx/read/read/close.
-struct StatFile {
+pub(crate) struct StatFile {
     file: File,
     buf: Vec<u8>,
 }
 
 impl StatFile {
-    fn open(path: impl AsRef<Path>) -> io::Result<Self> {
+    pub(crate) fn open(path: impl AsRef<Path>) -> io::Result<Self> {
         Ok(Self {
             file: File::open(path)?,
             buf: vec![0; 4096],
@@ -126,7 +131,7 @@ impl StatFile {
     /// These are all single-show seq_files, which return their whole
     /// content in one read when the buffer is large enough, so a short
     /// read means EOF.
-    fn read(&mut self) -> io::Result<&str> {
+    pub(crate) fn read(&mut self) -> io::Result<&str> {
         let mut len = 0;
         loop {
             if len == self.buf.len() {

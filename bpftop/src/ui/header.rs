@@ -1,6 +1,6 @@
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
-use ratatui::style::Style;
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Widget;
 
@@ -67,7 +67,8 @@ impl<'a> Widget for HeaderWidget<'a> {
                     if grid_col + 1 < grid_cols && bar_area.width > 1 {
                         bar_area.width -= 1;
                     }
-                    render_cpu_bar(buf, bar_area, &self.sys.cpus[cpu_idx], &label, self.theme);
+                    let reserved = self.sys.reserved_cpus.contains(cpu_idx);
+                    render_cpu_bar(buf, bar_area, &self.sys.cpus[cpu_idx], &label, reserved, self.theme);
                 }
             }
         }
@@ -102,7 +103,7 @@ impl<'a> Widget for HeaderWidget<'a> {
         let info_row = grid_rows + gpu_offset + 2;
         if info_row < rows.len() {
             let info_area = rows[info_row];
-            let line = Line::from(vec![
+            let mut spans = vec![
                 Span::styled("Tasks: ", Style::default().fg(self.theme.fg)),
                 Span::styled(
                     format!("{}", self.sys.total_tasks),
@@ -132,18 +133,47 @@ impl<'a> Widget for HeaderWidget<'a> {
                     format_uptime(self.sys.uptime_secs),
                     Style::default().fg(self.theme.fg),
                 ),
-            ]);
+            ];
+            if !self.sys.reserved_cpus.is_empty() {
+                spans.push(Span::styled("  Reserved: ", Style::default().fg(self.theme.fg)));
+                spans.push(Span::styled(
+                    reserved_text(self.sys),
+                    Style::default().fg(self.theme.cpu_reserved),
+                ));
+            }
+            let line = Line::from(spans);
             buf.set_line(info_area.x, info_area.y, &line, info_area.width);
         }
     }
 }
 
-fn render_cpu_bar(buf: &mut Buffer, area: Rect, cpu: &CpuStats, label: &str, theme: &Theme) {
+/// "12-15,28-31 bench.slice": each partition's CPUs and cgroup, or the
+/// reserved CPUs alone when no partition holds them (isolcpus).
+fn reserved_text(sys: &SystemInfo) -> String {
+    if sys.partitions.is_empty() {
+        return sys.reserved_cpus.to_string();
+    }
+    sys.partitions
+        .iter()
+        .map(|p| {
+            let kind = if p.isolated { " (isolated)" } else { "" };
+            format!("{} {}{kind}", p.cpus, p.cgroup)
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn render_cpu_bar(buf: &mut Buffer, area: Rect, cpu: &CpuStats, label: &str, reserved: bool, theme: &Theme) {
     if area.width < 10 {
         return;
     }
 
     let prefix = format!("{label}[");
+    let label_style = if reserved {
+        Style::default().fg(theme.cpu_reserved).add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(theme.fg)
+    };
     let suffix = format!("{:4.1}%]", cpu.total_pct);
     let bar_width = (area.width as usize).saturating_sub(prefix.len() + suffix.len());
     if bar_width == 0 {
@@ -159,7 +189,7 @@ fn render_cpu_bar(buf: &mut Buffer, area: Rect, cpu: &CpuStats, label: &str, the
     let nice_chars = ((cpu.nice_pct / 100.0) * bar_width as f64) as usize;
     let empty_chars = bar_width.saturating_sub(user_chars + sys_chars + nice_chars);
 
-    let mut spans = vec![Span::styled(prefix, Style::default().fg(theme.fg))];
+    let mut spans = vec![Span::styled(prefix, label_style)];
     if user_chars > 0 {
         spans.push(Span::styled(
             "|".repeat(user_chars),
@@ -332,4 +362,50 @@ fn render_swap_bar(buf: &mut Buffer, area: Rect, swap: &SwapInfo, theme: &Theme)
 
     let line = Line::from(spans);
     buf.set_line(area.x, area.y, &line, area.width);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::data::cpuset::{CpuSet, Partition};
+
+    fn render(sys: &SystemInfo) -> (Buffer, Theme) {
+        let theme = Theme::default();
+        let area = Rect::new(0, 0, 120, 5);
+        let mut buf = Buffer::empty(area);
+        HeaderWidget { sys, theme: &theme }.render(area, &mut buf);
+        (buf, theme)
+    }
+
+    fn row(buf: &Buffer, y: u16) -> String {
+        (0..buf.area.width).map(|x| buf[(x, y)].symbol()).collect()
+    }
+
+    #[test]
+    fn marks_reserved_cpus() {
+        let cpus = CpuSet::parse("2-3").unwrap();
+        let sys = SystemInfo {
+            cpus: vec![CpuStats::default(); 4],
+            reserved_cpus: cpus.clone(),
+            partitions: vec![Partition { cgroup: "bench.slice".into(), isolated: false, cpus }],
+            ..Default::default()
+        };
+        let (buf, theme) = render(&sys);
+        // 4 CPUs on 120 columns: one row of four 30-column meters.
+        let label_fg = |x: u16| buf[(x, 0)].fg;
+        assert_eq!(&row(&buf, 0)[60..62], "2[");
+        assert_eq!(label_fg(0), theme.fg);
+        assert_eq!(label_fg(30), theme.fg);
+        assert_eq!(label_fg(60), theme.cpu_reserved);
+        assert_eq!(label_fg(90), theme.cpu_reserved);
+        let info = row(&buf, 3);
+        assert!(info.contains("Reserved: 2-3 bench.slice"), "{info}");
+    }
+
+    #[test]
+    fn no_reserved_line_without_partitions() {
+        let sys = SystemInfo { cpus: vec![CpuStats::default(); 4], ..Default::default() };
+        let (buf, _) = render(&sys);
+        assert!(!row(&buf, 3).contains("Reserved"));
+    }
 }

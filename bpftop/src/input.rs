@@ -283,6 +283,19 @@ fn handle_normal_key(app: &mut App, key: KeyEvent) -> bool {
             app.sort_ascending = false;
             app.update_filtered_processes();
         }
+        // CPU placement columns: show sorted by CPU, then by AFFINITY, then hide.
+        KeyCode::Char('C') => {
+            let (show, next) = match (app.show_cpu, app.sort_column) {
+                (false, _) => (true, SortColumn::LastCpu),
+                (true, SortColumn::LastCpu) => (true, SortColumn::Affinity),
+                (true, SortColumn::Affinity) => (false, SortColumn::CpuPercent),
+                (true, _) => (true, SortColumn::LastCpu),
+            };
+            app.show_cpu = show;
+            app.sort_column = next;
+            app.sort_ascending = show;
+            app.update_filtered_processes();
+        }
         KeyCode::Char('W') => {
             app.sort_column = SortColumn::GpuMem;
             app.sort_ascending = false;
@@ -559,6 +572,7 @@ fn handle_mouse(app: &mut App, mouse: MouseEvent) {
                         gpu: has_gpu,
                         net: app.show_net,
                         io: app.show_io,
+                        cpu: app.show_cpu,
                     },
                 );
 

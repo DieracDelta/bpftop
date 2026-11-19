@@ -36,6 +36,7 @@ pub struct ProcessTableWidget<'a> {
     pub show_gpu: bool,
     pub show_net: bool,
     pub show_io: bool,
+    pub show_cpu: bool,
     pub visual_range: Option<(usize, usize)>,
     pub error_message: Option<&'a str>,
 }
@@ -257,6 +258,19 @@ impl<'a> ProcessTableWidget<'a> {
                     format!("{:>w$}", text(rate))
                 }
             }
+            SortColumn::LastCpu => match proc.last_cpu {
+                Some(cpu) => format!("{cpu:>w$}"),
+                None => format!("{:>w$}", "-"),
+            },
+            SortColumn::Affinity => {
+                let t = truncate_cols(&proc.affinity, w);
+                if t.len() < proc.affinity.len() {
+                    // Mark the cut, as the list goes on.
+                    format!("{}+", truncate_cols(t, w.saturating_sub(1)))
+                } else {
+                    format!("{:<w$}", proc.affinity)
+                }
+            }
             SortColumn::Time => {
                 let t = format_time(proc.cpu_time_secs);
                 format!("{:>w$}", t)
@@ -303,6 +317,7 @@ impl<'a> ProcessTableWidget<'a> {
                 gpu: self.show_gpu,
                 net: self.show_net,
                 io: self.show_io,
+                cpu: self.show_cpu,
             },
         )
     }
@@ -319,6 +334,7 @@ pub struct ColumnToggles {
     pub gpu: bool,
     pub net: bool,
     pub io: bool,
+    pub cpu: bool,
 }
 
 pub fn column_layout(
@@ -334,6 +350,7 @@ pub fn column_layout(
         .filter(|c| (**c != SortColumn::GpuPercent && **c != SortColumn::GpuMem) || show.gpu)
         .filter(|c| !matches!(**c, SortColumn::NetRate | SortColumn::NetTotal | SortColumn::NetIf) || show.net)
         .filter(|c| !matches!(**c, SortColumn::IoRead | SortColumn::IoWrite | SortColumn::Iops) || show.io)
+        .filter(|c| !matches!(**c, SortColumn::LastCpu | SortColumn::Affinity) || show.cpu)
         .map(|c| (*c, c.width()))
         .collect();
 

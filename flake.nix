@@ -158,6 +158,18 @@
             mkdir -p $out/bin
             $CC -O2 -Wall -o $out/bin/netbench ${./bench/netbench.c}
           '';
+          # Sends and receives UDP on loopback every 50ms; argv carries a marker.
+          udpLoop = pkgs.writeText "udp-loop.py" ''
+            import socket, time
+            r = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            r.bind(("127.0.0.1", 0))
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.connect(r.getsockname())
+            while True:
+                s.send(b"x" * 100)
+                r.recv(200)
+                time.sleep(0.05)
+          '';
         in {
         bench-vm = pkgs.testers.runNixOSTest {
           name = "bpftop-bench-vm";
@@ -342,6 +354,47 @@
             check_net(parse(kdump), "kprobe")
             machine.succeed("echo 0 > /sys/fs/cgroup/system.slice/freezeme.service/cgroup.freeze")
             machine.succeed("systemctl kill --signal=CONT stopme")
+            # Before any partition, a process may run anywhere: "all".
+            assert next(r for r in rows if r["pid"] == "1")["affinity"] == "all", rows[0]
+
+            # ── Reserved CPUs: a cpuset partition on CPUs 2-3 ────────
+            # Made the way a systemd host would: a slice kept alive by a
+            # placeholder unit, restricted to the CPUs, then made a partition.
+            part = "/sys/fs/cgroup/reserved.slice"
+            machine.succeed(
+                "systemd-run --unit=hold --slice=reserved.slice -p AllowedCPUs=2-3 ${pkgs.coreutils}/bin/sleep infinity"
+                " && systemctl set-property --runtime reserved.slice AllowedCPUs=2-3"
+                f" && echo 2-3 > {part}/cpuset.cpus.exclusive && echo root > {part}/cpuset.cpus.partition"
+            )
+            assert machine.succeed(f"cat {part}/cpuset.cpus.partition").strip() == "root"
+            # Both exec (after bench has loaded) into a UDP loop pinned to one
+            # CPU: CPU 3 inside the partition, CPU 1 outside it. The hooks skip
+            # CPU 3, so that one has no network bytes and no exec'd cmdline
+            # (it is read from /proc instead).
+            for unit, cpu, slice in [("inpart", 3, "--slice=reserved.slice"), ("outpart", 1, "")]:
+                machine.succeed(
+                    f"systemd-run --unit={unit} {slice} ${pkgs.bash}/bin/bash -c '${pkgs.coreutils}/bin/sleep 10; "
+                    f"exec ${pkgs.util-linux}/bin/taskset -c {cpu} ${pkgs.python3}/bin/python3 ${udpLoop} marker-{unit}'"
+                )
+            pdump = machine.succeed("bench --dump --settle-ms 15000 --warmup 1 --iterations 1 --interval-ms 1000 | tee /tmp/results/dump_partition.tsv")
+            prows = parse(pdump)
+            inside, outside = find(prows, "marker-inpart"), find(prows, "marker-outpart")
+            assert inside["cmdline"].endswith("udp-loop.py marker-inpart"), inside
+            assert (inside["last_cpu"], inside["affinity"]) == ("3", "3"), inside
+            assert inside["net_tx"] == "0" and inside["net_rx"] == "0", f"hooks ran on a reserved CPU: {inside}"
+            assert (outside["last_cpu"], outside["affinity"]) == ("1", "1"), outside
+            assert int(outside["net_tx"]) > 0 and int(outside["net_rx"]) > 0, outside
+            # The kernel takes the partition's CPUs away from everything else.
+            assert next(r for r in prows if r["pid"] == "1")["affinity"] == "0-1", prows[0]
+            parts = machine.succeed("bench --partitions --warmup 0 --iterations 1")
+            assert parts.splitlines() == ["reserved\t2-3", "partition\treserved.slice\troot\t2-3"], parts
+            machine.succeed(
+                f"echo member > {part}/cpuset.cpus.partition && echo > {part}/cpuset.cpus.exclusive"
+                " && systemctl stop inpart outpart hold"
+                " && systemctl set-property --runtime reserved.slice AllowedCPUs="
+            )
+            parts = machine.succeed("bench --partitions --warmup 0 --iterations 1")
+            assert parts.splitlines() == ["reserved\t"], parts
 
             # ── Network probe overhead on other processes ────────────
             def netbench(tag):

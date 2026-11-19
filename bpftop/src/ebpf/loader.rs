@@ -2,12 +2,13 @@ use std::fs;
 use std::io::{ErrorKind, Read};
 
 use anyhow::{Context, Result};
-use aya::maps::HashMap as BpfHashMap;
+use aya::maps::{Array, HashMap as BpfHashMap};
 use aya::programs::iter::{Iter, IterLink};
 use aya::programs::{FExit, KProbe, TracePoint};
 use aya::{Btf, Ebpf};
 use bpftop_common::{parse_iter_records, CmdlineEvent, IterRecords};
 
+use crate::data::cpuset::CpuSet;
 use crate::data::process::display_text;
 
 /// The compiled eBPF object. Built before the userspace crate is compiled.
@@ -75,7 +76,12 @@ pub struct EbpfLoader {
     pub net_probe_mode: Option<NetProbeMode>,
     /// Iterator output buffer, reused across cycles.
     iter_buf: Vec<u8>,
+    /// CPUs currently marked in SKIP_CPUS.
+    skipped: CpuSet,
 }
+
+/// Entries in the SKIP_CPUS map (MAX_SKIP_CPUS in bpftop.bpf.c).
+const MAX_SKIP_CPUS: usize = 4096;
 
 impl EbpfLoader {
     /// Load and attach all eBPF programs (iterator + tracepoints).
@@ -125,12 +131,13 @@ impl EbpfLoader {
             bpf: Some(bpf),
             net_probe_mode: Some(net_probe_mode),
             iter_buf: Vec::new(),
+            skipped: CpuSet::default(),
         })
     }
 
     /// Create a no-op loader (used as placeholder after moving the real one).
     pub fn noop() -> Self {
-        Self { bpf: None, net_probe_mode: None, iter_buf: Vec::new() }
+        Self { bpf: None, net_probe_mode: None, iter_buf: Vec::new(), skipped: CpuSet::default() }
     }
 
     pub fn is_loaded(&self) -> bool {
@@ -202,6 +209,22 @@ impl EbpfLoader {
         } else {
             Some((event.gen, s))
         }
+    }
+
+    /// Make the hooks (exec/exit tracepoints, network probes) return at
+    /// once on `cpus`, and run normally everywhere else.
+    pub fn set_skip_cpus(&mut self, cpus: &CpuSet) -> Result<()> {
+        let bpf = self.bpf.as_mut().context("eBPF not loaded")?;
+        let map = bpf.map_mut("SKIP_CPUS").context("SKIP_CPUS not found")?;
+        let mut array = Array::<_, u8>::try_from(map)
+            .map_err(|e| anyhow::anyhow!("SKIP_CPUS is not an Array: {e}"))?;
+        let (off, on) = (self.skipped.difference(cpus), cpus.difference(&self.skipped));
+        let changed = off.iter().map(|cpu| (cpu, 0)).chain(on.iter().map(|cpu| (cpu, 1)));
+        for (cpu, skip) in changed.filter(|&(cpu, _)| cpu < MAX_SKIP_CPUS) {
+            array.set(cpu as u32, &skip, 0).with_context(|| format!("updating SKIP_CPUS[{cpu}]"))?;
+        }
+        self.skipped = cpus.clone();
+        Ok(())
     }
 
     /// Insert a cmdline entry into the BPF map (used for startup seeding).
@@ -326,7 +349,7 @@ fn attach_kprobes(bpf: &mut Ebpf, probe: &NetProbe) -> Result<()> {
 /// Generation of CMDLINE_MAP entries seeded from /proc at startup.
 pub const SEEDED_GEN: u64 = 1;
 
-fn read_proc_cmdline(pid: u32) -> Option<String> {
+pub fn read_proc_cmdline(pid: u32) -> Option<String> {
     let s = display_text(&fs::read(format!("/proc/{pid}/cmdline")).ok()?);
     (!s.is_empty()).then_some(s)
 }

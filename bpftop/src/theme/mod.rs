@@ -22,6 +22,8 @@ pub struct Theme {
     pub cpu_system: Color,
     pub cpu_nice: Color,
     pub cpu_iowait: Color,
+    /// Labels of CPUs reserved by a cpuset partition.
+    pub cpu_reserved: Color,
     pub mem_used: Color,
     pub mem_cached: Color,
     pub mem_buffers: Color,
@@ -78,6 +80,7 @@ impl Theme {
         if let Some(c) = ov.cpu_system.as_deref().and_then(parse_hex_color) { self.cpu_system = c; }
         if let Some(c) = ov.cpu_nice.as_deref().and_then(parse_hex_color) { self.cpu_nice = c; }
         if let Some(c) = ov.cpu_iowait.as_deref().and_then(parse_hex_color) { self.cpu_iowait = c; }
+        if let Some(c) = ov.cpu_reserved.as_deref().and_then(parse_hex_color) { self.cpu_reserved = c; }
         if let Some(c) = ov.mem_used.as_deref().and_then(parse_hex_color) { self.mem_used = c; }
         if let Some(c) = ov.mem_cached.as_deref().and_then(parse_hex_color) { self.mem_cached = c; }
         if let Some(c) = ov.mem_buffers.as_deref().and_then(parse_hex_color) { self.mem_buffers = c; }
@@ -102,6 +105,7 @@ pub struct ThemeOverrides {
     pub cpu_system: Option<String>,
     pub cpu_nice: Option<String>,
     pub cpu_iowait: Option<String>,
+    pub cpu_reserved: Option<String>,
     pub mem_used: Option<String>,
     pub mem_cached: Option<String>,
     pub mem_buffers: Option<String>,

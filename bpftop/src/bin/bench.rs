@@ -60,6 +60,11 @@ struct Cli {
     /// Also build per-thread rows (as when threads are shown in the UI)
     #[arg(long)]
     threads: bool,
+
+    /// Print the reserved CPUs and the cpuset partitions holding them
+    /// (after the last cycle) instead of timing results
+    #[arg(long)]
+    partitions: bool,
 }
 
 #[derive(Serialize)]
@@ -133,6 +138,7 @@ fn main() -> Result<()> {
     let mut process_count = 0;
     let mut task_count = 0;
     let mut last_procs = Vec::new();
+    let mut last_sys = None;
 
     for i in 0..cli.iterations {
         if cli.interval_ms > 0 {
@@ -147,6 +153,7 @@ fn main() -> Result<()> {
         timings_us.push(us(elapsed));
         phases.push(collector.last_timings);
         last_procs = procs;
+        last_sys = Some(sys);
 
         if !cli.json && (i + 1) % 10 == 0 {
             eprintln!(
@@ -159,11 +166,21 @@ fn main() -> Result<()> {
         }
     }
 
+    if cli.partitions {
+        let sys = last_sys.context("no collection cycle ran (--iterations 0?)")?;
+        println!("reserved\t{}", sys.reserved_cpus);
+        for p in &sys.partitions {
+            let kind = if p.isolated { "isolated" } else { "root" };
+            println!("partition\t{}\t{kind}\t{}", p.cgroup, p.cpus);
+        }
+        return Ok(());
+    }
+
     if cli.dump {
-        println!("pid\tppid\tuser\tstate\tthread\tkthread\tfrozen\tres\tshr\tcpu\tnet_tx\tnet_rx\tnet_if\tio_read\tio_write\tiops\tcontainer\tcomm\tcmdline");
+        println!("pid\tppid\tuser\tstate\tthread\tkthread\tfrozen\tres\tshr\tcpu\tnet_tx\tnet_rx\tnet_if\tio_read\tio_write\tiops\tlast_cpu\taffinity\tcontainer\tcomm\tcmdline");
         for p in &last_procs {
             println!(
-                "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{:.1}\t{}\t{}\t{}\t{:.0}\t{:.0}\t{:.0}\t{}\t{}\t{}",
+                "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{:.1}\t{}\t{}\t{}\t{:.0}\t{:.0}\t{:.0}\t{}\t{}\t{}\t{}\t{}",
                 p.pid,
                 p.ppid,
                 p.user,
@@ -180,6 +197,8 @@ fn main() -> Result<()> {
                 p.io_read_rate,
                 p.io_write_rate,
                 p.iops,
+                p.last_cpu.map_or("-".to_string(), |c| c.to_string()),
+                p.affinity,
                 p.container.as_deref().unwrap_or("-"),
                 p.comm,
                 p.cmdline

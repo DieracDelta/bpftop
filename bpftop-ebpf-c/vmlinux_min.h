@@ -87,6 +87,18 @@ struct sched_entity {
 	u64 sum_exec_runtime;
 };
 
+/* Only the first word is declared; readers copy as many words as they
+ * keep with bpf_probe_read_kernel. */
+struct cpumask {
+	unsigned long bits[1];
+};
+
+/* Kernels before 5.16 keep the CPU a task runs on in thread_info
+ * (task_struct___thread_info below); later ones in task_struct.cpu. */
+struct thread_info {
+	u32 cpu;
+};
+
 struct task_struct {
 	unsigned int __state;
 	unsigned int flags;
@@ -104,6 +116,13 @@ struct task_struct {
 	struct css_set *cgroups;
 	struct signal_struct *signal;
 	struct task_io_accounting ioac;
+	unsigned int cpu;
+	int nr_cpus_allowed;
+	const struct cpumask *cpus_ptr;
+};
+
+struct task_struct___thread_info {
+	struct thread_info thread_info;
 };
 
 struct net_device {
@@ -170,6 +189,7 @@ struct user_pt_regs {
 
 enum {
 	BPF_MAP_TYPE_HASH = 1,
+	BPF_MAP_TYPE_ARRAY = 2,
 	BPF_MAP_TYPE_LRU_HASH = 9,
 	BPF_ANY = 0,
 };

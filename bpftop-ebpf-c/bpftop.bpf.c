@@ -15,6 +15,8 @@ typedef long long __s64;
 
 #define NULL ((void *)0)
 #define PF_KTHREAD 0x00200000
+/* cmdline_event.gen of entries seeded from /proc (loader.rs SEEDED_GEN). */
+#define SEEDED_GEN 1
 
 /* /proc/<pid>/io style counters: storage bytes and read/write syscalls. */
 struct io_counters {
@@ -22,6 +24,15 @@ struct io_counters {
 	u64 write_bytes;
 	u64 syscr;
 	u64 syscw;
+};
+
+/* Where a task runs and may run. cpus_allowed holds CPUs 0-255; CPUs past
+ * that are left out. cpu is ~0 where the kernel lacks the field. */
+#define CPU_MASK_WORDS 4
+struct cpu_placement {
+	u32 cpu;
+	u32 nr_cpus_allowed;
+	u64 cpus_allowed[CPU_MASK_WORDS];
 };
 
 struct task_info {
@@ -52,6 +63,7 @@ struct task_info {
 	u8 frozen;
 	u8 kthread;
 	u8 _pad2[6];
+	struct cpu_placement placement;
 };
 
 /* Emitted for non-leader threads: enough to sum a process's CPU time
@@ -65,6 +77,7 @@ struct thread_rec {
 	u32 _pad;
 	char comm[16];
 	struct io_counters io;
+	struct cpu_placement placement;
 };
 
 struct cmdline_event {
@@ -79,9 +92,9 @@ struct cmdline_event {
 };
 
 /* Keep in sync with bpftop-common/src/lib.rs (asserted on both sides). */
-_Static_assert(sizeof(struct task_info) == 168, "task_info ABI");
+_Static_assert(sizeof(struct task_info) == 208, "task_info ABI");
 _Static_assert(sizeof(struct cmdline_event) == 280, "cmdline_event ABI");
-_Static_assert(sizeof(struct thread_rec) == 72, "thread_rec ABI");
+_Static_assert(sizeof(struct thread_rec) == 112, "thread_rec ABI");
 
 struct net_stats {
 	u64 tx_bytes;
@@ -116,6 +129,35 @@ struct {
 	__type(key, u64);
 	__type(value, u64);
 } RECV_SOCK_STASH SEC(".maps");
+
+/*
+ * CPUs the hooks below leave alone: 1 at a CPU's index while it is
+ * reserved by a cpuset partition (set by userspace). Attachments are
+ * global, so the hooks still fire there, but return before doing any
+ * work. The task iterator runs on bpftop's own CPU and isn't affected.
+ */
+#define MAX_SKIP_CPUS 4096
+struct {
+	__uint(type, BPF_MAP_TYPE_ARRAY);
+	__uint(max_entries, MAX_SKIP_CPUS);
+	__type(key, u32);
+	__type(value, u8);
+} SKIP_CPUS SEC(".maps");
+
+static __always_inline bool on_skipped_cpu(void)
+{
+	u32 cpu = bpf_get_smp_processor_id();
+	u8 *skip = bpf_map_lookup_elem(&SKIP_CPUS, &cpu);
+
+	return skip && *skip;
+}
+
+/* First statement of every hook (not of the iterator). */
+#define SKIP_ON_RESERVED_CPU() \
+	do { \
+		if (on_skipped_cpu()) \
+			return 0; \
+	} while (0)
 
 /*
  * The iterator's task is a trusted BTF pointer, so fields are read with
@@ -156,6 +198,19 @@ static __always_inline void add_io(struct io_counters *io, struct task_io_accoun
 	}
 }
 
+static __always_inline void read_placement(struct task_struct *task, struct cpu_placement *p)
+{
+	if (bpf_core_field_exists(task->cpu)) {
+		p->cpu = task->cpu;
+	} else {
+		struct task_struct___thread_info *old = (void *)task;
+
+		p->cpu = bpf_core_field_exists(old->thread_info.cpu) ? old->thread_info.cpu : ~0u;
+	}
+	p->nr_cpus_allowed = task->nr_cpus_allowed;
+	bpf_probe_read_kernel(&p->cpus_allowed, sizeof(p->cpus_allowed), task->cpus_ptr);
+}
+
 SEC("iter/task")
 int dump_task(struct bpf_iter__task *ctx)
 {
@@ -178,6 +233,7 @@ int dump_task(struct bpf_iter__task *ctx)
 		};
 		bpf_probe_read_kernel(&tr.comm, sizeof(tr.comm), &task->comm);
 		add_io(&tr.io, &task->ioac);
+		read_placement(task, &tr.placement);
 		bpf_seq_write(ctx->meta->seq, &tr, sizeof(tr));
 		return 0;
 	}
@@ -229,11 +285,15 @@ int dump_task(struct bpf_iter__task *ctx)
 	info.start_time_ns = task->start_time;
 	bpf_probe_read_kernel(&info.comm, sizeof(info.comm), &task->comm);
 	read_cgroup(task, &info);
+	read_placement(task, &info.placement);
 
 	/* Join the per-process maps here so userspace needs no per-PID
 	 * map syscalls in the steady state. */
 	struct cmdline_event *ev = bpf_map_lookup_elem(&CMDLINE_MAP, &info.pid);
-	if (ev)
+	/* An entry older than the task belongs to an earlier process with the
+	 * same PID whose exit was not seen (on a skipped CPU). gen is ktime at
+	 * exec, the clock of start_time; seeded entries (gen 1) predate it. */
+	if (ev && (ev->gen == SEEDED_GEN || ev->gen >= info.start_time_ns))
 		info.cmdline_gen = ev->gen;
 
 	struct net_stats *net = bpf_map_lookup_elem(&NET_STATS, &info.pid);
@@ -250,6 +310,8 @@ int dump_task(struct bpf_iter__task *ctx)
 SEC("tracepoint/sched/sched_process_exec")
 int capture_cmdline(void *ctx)
 {
+	SKIP_ON_RESERVED_CPU();
+
 	u64 pid_tgid = bpf_get_current_pid_tgid();
 	u32 pid = pid_tgid >> 32;
 	struct task_struct *task = (struct task_struct *)bpf_get_current_task();
@@ -289,6 +351,8 @@ int capture_cmdline(void *ctx)
 SEC("tracepoint/sched/sched_process_exit")
 int cleanup_cmdline(void *ctx)
 {
+	SKIP_ON_RESERVED_CPU();
+
 	u32 pid = bpf_get_current_pid_tgid() >> 32;
 	struct task_struct *task = (struct task_struct *)bpf_get_current_task();
 
@@ -388,6 +452,8 @@ static __always_inline bool is_inet6(struct sock *sk)
 SEC("kprobe/tcp_sendmsg")
 int kprobe_tcp_sendmsg(struct pt_regs *ctx)
 {
+	SKIP_ON_RESERVED_CPU();
+
 	struct sock *sk = (struct sock *)PT_REGS_PARM1(ctx);
 	u64 size = PT_REGS_PARM3(ctx);
 
@@ -398,6 +464,8 @@ int kprobe_tcp_sendmsg(struct pt_regs *ctx)
 SEC("kprobe/udp_sendmsg")
 int kprobe_udp_sendmsg(struct pt_regs *ctx)
 {
+	SKIP_ON_RESERVED_CPU();
+
 	struct sock *sk = (struct sock *)PT_REGS_PARM1(ctx);
 	u64 size = PT_REGS_PARM3(ctx);
 
@@ -409,6 +477,8 @@ int kprobe_udp_sendmsg(struct pt_regs *ctx)
 SEC("kprobe/udpv6_sendmsg")
 int kprobe_udpv6_sendmsg(struct pt_regs *ctx)
 {
+	SKIP_ON_RESERVED_CPU();
+
 	struct sock *sk = (struct sock *)PT_REGS_PARM1(ctx);
 	u64 size = PT_REGS_PARM3(ctx);
 
@@ -419,6 +489,8 @@ int kprobe_udpv6_sendmsg(struct pt_regs *ctx)
 SEC("kprobe/tcp_recvmsg")
 int kprobe_tcp_recvmsg(struct pt_regs *ctx)
 {
+	SKIP_ON_RESERVED_CPU();
+
 	stash_recv_sock((struct sock *)PT_REGS_PARM1(ctx));
 	return 0;
 }
@@ -426,6 +498,8 @@ int kprobe_tcp_recvmsg(struct pt_regs *ctx)
 SEC("kretprobe/tcp_recvmsg")
 int kretprobe_tcp_recvmsg(struct pt_regs *ctx)
 {
+	SKIP_ON_RESERVED_CPU();
+
 	u64 pid_tgid = bpf_get_current_pid_tgid();
 	struct sock *sk = pop_recv_sock(pid_tgid);
 	s32 ret = PT_REGS_RC(ctx);
@@ -438,6 +512,8 @@ int kretprobe_tcp_recvmsg(struct pt_regs *ctx)
 SEC("kprobe/udp_recvmsg")
 int kprobe_udp_recvmsg(struct pt_regs *ctx)
 {
+	SKIP_ON_RESERVED_CPU();
+
 	stash_recv_sock((struct sock *)PT_REGS_PARM1(ctx));
 	return 0;
 }
@@ -445,6 +521,8 @@ int kprobe_udp_recvmsg(struct pt_regs *ctx)
 SEC("kretprobe/udp_recvmsg")
 int kretprobe_udp_recvmsg(struct pt_regs *ctx)
 {
+	SKIP_ON_RESERVED_CPU();
+
 	u64 pid_tgid = bpf_get_current_pid_tgid();
 	struct sock *sk = pop_recv_sock(pid_tgid);
 	s32 ret = PT_REGS_RC(ctx);
@@ -457,6 +535,8 @@ int kretprobe_udp_recvmsg(struct pt_regs *ctx)
 SEC("kprobe/udpv6_recvmsg")
 int kprobe_udpv6_recvmsg(struct pt_regs *ctx)
 {
+	SKIP_ON_RESERVED_CPU();
+
 	stash_recv_sock((struct sock *)PT_REGS_PARM1(ctx));
 	return 0;
 }
@@ -464,6 +544,8 @@ int kprobe_udpv6_recvmsg(struct pt_regs *ctx)
 SEC("kretprobe/udpv6_recvmsg")
 int kretprobe_udpv6_recvmsg(struct pt_regs *ctx)
 {
+	SKIP_ON_RESERVED_CPU();
+
 	u64 pid_tgid = bpf_get_current_pid_tgid();
 	struct sock *sk = pop_recv_sock(pid_tgid);
 	s32 ret = PT_REGS_RC(ctx);
@@ -492,6 +574,8 @@ static __always_inline int func_ret(void *ctx)
 SEC("fexit/tcp_sendmsg")
 int BPF_PROG(fexit_tcp_sendmsg, struct sock *sk)
 {
+	SKIP_ON_RESERVED_CPU();
+
 	int ret = func_ret(ctx);
 
 	if (ret > 0)
@@ -502,6 +586,8 @@ int BPF_PROG(fexit_tcp_sendmsg, struct sock *sk)
 SEC("fexit/udp_sendmsg")
 int BPF_PROG(fexit_udp_sendmsg, struct sock *sk)
 {
+	SKIP_ON_RESERVED_CPU();
+
 	int ret = func_ret(ctx);
 
 	if (ret > 0 && !is_inet6(sk))
@@ -512,6 +598,8 @@ int BPF_PROG(fexit_udp_sendmsg, struct sock *sk)
 SEC("fexit/udpv6_sendmsg")
 int BPF_PROG(fexit_udpv6_sendmsg, struct sock *sk)
 {
+	SKIP_ON_RESERVED_CPU();
+
 	int ret = func_ret(ctx);
 
 	if (ret > 0)
@@ -522,6 +610,8 @@ int BPF_PROG(fexit_udpv6_sendmsg, struct sock *sk)
 SEC("fexit/tcp_recvmsg")
 int BPF_PROG(fexit_tcp_recvmsg, struct sock *sk)
 {
+	SKIP_ON_RESERVED_CPU();
+
 	int ret = func_ret(ctx);
 
 	if (ret > 0)
@@ -532,6 +622,8 @@ int BPF_PROG(fexit_tcp_recvmsg, struct sock *sk)
 SEC("fexit/udp_recvmsg")
 int BPF_PROG(fexit_udp_recvmsg, struct sock *sk)
 {
+	SKIP_ON_RESERVED_CPU();
+
 	int ret = func_ret(ctx);
 
 	if (ret > 0)
@@ -542,6 +634,8 @@ int BPF_PROG(fexit_udp_recvmsg, struct sock *sk)
 SEC("fexit/udpv6_recvmsg")
 int BPF_PROG(fexit_udpv6_recvmsg, struct sock *sk)
 {
+	SKIP_ON_RESERVED_CPU();
+
 	int ret = func_ret(ctx);
 
 	if (ret > 0)

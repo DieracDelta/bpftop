@@ -6,12 +6,13 @@ use std::time::{Duration, Instant};
 use anyhow::Result;
 
 use super::container::CgroupResolver;
+use super::cpuset::{CpuSet, ReservedCpus};
 #[cfg(feature = "gpu")]
 use super::gpu::GpuCollector;
 use super::process::{display_text, ProcessInfo, ProcessState, Text};
 use super::system::*;
 use crate::ebpf::loader::{self, EbpfLoader};
-use bpftop_common::IoCounters;
+use bpftop_common::{CpuPlacement, IoCounters};
 
 /// Wall time spent in each phase of the most recent `collect()`.
 #[derive(Debug, Clone, Copy, Default)]
@@ -41,6 +42,14 @@ pub struct Collector {
     ebpf: EbpfLoader,
     system: Option<SystemReader>,
     cgroup_resolver: CgroupResolver,
+    reserved: ReservedCpus,
+    /// The online CPUs, read when the reserved CPUs change.
+    online: CpuSet,
+    /// placement mask → AFFINITY text (few distinct masks exist).
+    affinity_cache: HashMap<[u64; 4], Text>,
+    /// pid → (start time, comm, cmdline) read from /proc for processes
+    /// that exec'd where the exec hook is skipped (no CMDLINE_MAP entry).
+    proc_cmdlines: HashMap<u32, (u64, Text, Text)>,
     /// pid → (CMDLINE_MAP generation, cmdline)
     cmdline_cache: HashMap<u32, (u64, Text)>,
     /// uid → username (or the uid as a string if it has no passwd entry)
@@ -81,6 +90,11 @@ impl Collector {
             }
         }
 
+        // Turn the hooks off on reserved CPUs before anything runs there.
+        let mut reserved = ReservedCpus::new();
+        let mut online = CpuSet::default();
+        sync_reserved(&mut reserved, &mut online, &mut ebpf);
+
         let mut system = SystemReader::new()
             .inspect_err(|e| log::error!("system stats unavailable: {e:#}"))
             .ok();
@@ -97,6 +111,10 @@ impl Collector {
             ebpf,
             system,
             cgroup_resolver: CgroupResolver::new(),
+            reserved,
+            online,
+            affinity_cache: HashMap::new(),
+            proc_cmdlines: HashMap::new(),
             cmdline_cache,
             username_cache: HashMap::new(),
             username_cache_time: Instant::now(),
@@ -124,6 +142,10 @@ impl Collector {
             ebpf: EbpfLoader::noop(),
             system: None,
             cgroup_resolver: CgroupResolver::empty(),
+            reserved: ReservedCpus::new(),
+            online: CpuSet::default(),
+            affinity_cache: HashMap::new(),
+            proc_cmdlines: HashMap::new(),
             cmdline_cache: HashMap::new(),
             username_cache: HashMap::new(),
             username_cache_time: Instant::now(),
@@ -166,6 +188,10 @@ impl Collector {
             .as_mut()
             .ok_or_else(|| anyhow::anyhow!("system stats unavailable"))?;
         let (mut cpu_total, mut cpus) = system.read_cpu_stats()?;
+        if sync_reserved(&mut self.reserved, &mut self.online, &mut self.ebpf) {
+            // "all" depends on the online CPUs.
+            self.affinity_cache.clear();
+        }
         let (memory, swap) = system.read_memory_info()?;
         let load_avg = system.read_load_avg()?;
         let uptime = system.read_uptime()?;
@@ -209,6 +235,7 @@ impl Collector {
             self.username_cache_time = Instant::now();
         }
         let mut cmdline_cache = HashMap::with_capacity(self.cmdline_cache.len());
+        let mut proc_cmdlines = HashMap::new();
         let mut new_net_bytes = HashMap::new();
         let mut new_io = HashMap::with_capacity(self.prev_io.len());
 
@@ -288,28 +315,55 @@ impl Collector {
 
             let is_kernel_thread = task.kthread != 0;
 
-            // cmdline: prefer BPF CMDLINE_MAP, fall back to comm. Only hit
-            // the map when the entry's generation differs from the cached one.
             let comm = Text::from(comm_to_string(&task.comm));
-            let cached = self
-                .cmdline_cache
-                .remove(&task.pid)
-                .filter(|(gen, _)| *gen == task.cmdline_gen);
-            let fetched = match cached {
-                Some(entry) => Some(entry),
-                None if task.cmdline_gen != 0 => self
-                    .ebpf
-                    .get_cmdline(task.pid)
-                    .map(|(gen, s)| (gen, Text::from(s))),
-                None => None,
-            };
-            let cmdline = match fetched {
-                Some((gen, cmdline)) => {
-                    cmdline_cache.insert(task.pid, (gen, cmdline.clone()));
-                    cmdline
+            let last_cpu = task.placement.last_cpu();
+            // The exec hook skips reserved CPUs, so CMDLINE_MAP misses (or
+            // has a stale entry for) processes that exec'd there. For those,
+            // read /proc instead: once, and again when the comm changes (as
+            // an exec usually changes it) or the PID is reused.
+            let on_reserved_cpu = !is_kernel_thread
+                && last_cpu.is_some_and(|cpu| self.reserved.cpus().contains(cpu as usize));
+            let cmdline = if on_reserved_cpu {
+                let cached = self
+                    .proc_cmdlines
+                    .remove(&task.pid)
+                    .filter(|(start, c, _)| *start == task.start_time_ns && *c == comm);
+                let entry = cached.or_else(|| {
+                    let cmdline = loader::read_proc_cmdline(task.pid)?;
+                    Some((task.start_time_ns, comm.clone(), Text::from(cmdline)))
+                });
+                match entry {
+                    Some(entry) => {
+                        let cmdline = entry.2.clone();
+                        proc_cmdlines.insert(task.pid, entry);
+                        cmdline
+                    }
+                    None => Text::from(format!("[{}]", comm)),
                 }
-                None => Text::from(format!("[{}]", comm)),
+            } else {
+                // Prefer BPF CMDLINE_MAP, fall back to comm. Only hit the
+                // map when the entry's generation differs from the cached one.
+                let cached = self
+                    .cmdline_cache
+                    .remove(&task.pid)
+                    .filter(|(gen, _)| *gen == task.cmdline_gen);
+                let fetched = match cached {
+                    Some(entry) => Some(entry),
+                    None if task.cmdline_gen != 0 => self
+                        .ebpf
+                        .get_cmdline(task.pid)
+                        .map(|(gen, s)| (gen, Text::from(s))),
+                    None => None,
+                };
+                match fetched {
+                    Some((gen, cmdline)) => {
+                        cmdline_cache.insert(task.pid, (gen, cmdline.clone()));
+                        cmdline
+                    }
+                    None => Text::from(format!("[{}]", comm)),
+                }
             };
+            let affinity = self.affinity_text(&task.placement);
 
             // Container: resolve from cgroup_id
             let cgroup_path = self.cgroup_resolver.resolve_path(task.cgroup_id);
@@ -369,6 +423,9 @@ impl Collector {
                 io_write_rate: io_rates.write,
                 iops: io_rates.ops,
                 cpu_time_secs,
+                last_cpu,
+                affinity,
+                nr_cpus_allowed: task.placement.nr_cpus_allowed,
                 start_time_ns: task.start_time_ns,
                 comm,
                 cmdline,
@@ -387,6 +444,7 @@ impl Collector {
         }
 
         self.cmdline_cache = cmdline_cache;
+        self.proc_cmdlines = proc_cmdlines;
 
         // Thread rows, while the UI shows threads. A thread shares its
         // process's user, memory, cgroup and cmdline (like htop); only
@@ -408,6 +466,9 @@ impl Collector {
                 row.comm = Text::from(comm_to_string(&t.comm));
                 row.cpu_percent = cpu_percent_of(t.cpu_ns.saturating_sub(prev));
                 row.cpu_time_secs = t.cpu_ns as f64 / 1_000_000_000.0;
+                row.last_cpu = t.placement.last_cpu();
+                row.affinity = self.affinity_text(&t.placement);
+                row.nr_cpus_allowed = t.placement.nr_cpus_allowed;
                 row.prev_cpu_ns = t.cpu_ns;
                 row.net_rx_bytes = 0;
                 row.net_tx_bytes = 0;
@@ -487,11 +548,54 @@ impl Collector {
             running_tasks: running,
             sleeping_tasks: sleeping,
             gpus,
+            reserved_cpus: self.reserved.cpus().clone(),
+            partitions: self.reserved.partitions().to_vec(),
         };
 
         Ok((sys_info, processes))
     }
 
+}
+
+impl Collector {
+    /// The AFFINITY text for a placement: "all" when it allows every
+    /// online CPU, else its CPU list. Only online CPUs are listed: the
+    /// kernel leaves the mask's bits past the possible CPUs unspecified.
+    fn affinity_text(&mut self, placement: &CpuPlacement) -> Text {
+        let online = &self.online;
+        self.affinity_cache
+            .entry(placement.cpus_allowed)
+            .or_insert_with(|| {
+                let mut allowed = CpuSet::from_words(&placement.cpus_allowed);
+                if !online.is_empty() {
+                    allowed = allowed.intersection(online);
+                }
+                if !online.is_empty() && allowed == *online {
+                    Text::from("all")
+                } else {
+                    Text::from(allowed.to_string())
+                }
+            })
+            .clone()
+    }
+}
+
+/// Re-read the reserved CPUs; when they changed, tell the BPF hooks and
+/// re-read the online CPUs. Returns whether they changed.
+fn sync_reserved(reserved: &mut ReservedCpus, online: &mut CpuSet, ebpf: &mut EbpfLoader) -> bool {
+    if !reserved.refresh() && !online.is_empty() {
+        return false;
+    }
+    *online = std::fs::read_to_string("/sys/devices/system/cpu/online")
+        .ok()
+        .and_then(|s| CpuSet::parse(&s))
+        .unwrap_or_default();
+    if ebpf.is_loaded() {
+        if let Err(e) = ebpf.set_skip_cpus(reserved.cpus()) {
+            log::warn!("could not update the CPUs the BPF hooks skip: {e:#}");
+        }
+    }
+    true
 }
 
 /// Per-second I/O rates between two samples of one task's counters.

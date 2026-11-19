@@ -32,6 +32,12 @@ pub struct ProcessInfo {
     pub io_write_rate: f64,
     pub iops: f64,
     pub cpu_time_secs: f64,
+    /// The CPU the task last ran on.
+    pub last_cpu: Option<u32>,
+    /// The CPUs it may run on, as a CPU list, or "all" for every online CPU.
+    pub affinity: Text,
+    /// How many CPUs it may run on (sorts the AFFINITY column).
+    pub nr_cpus_allowed: u32,
     #[allow(dead_code)]
     pub start_time_ns: u64,
     pub comm: Text,
@@ -229,6 +235,8 @@ pub enum SortColumn {
     IoRead,
     IoWrite,
     Iops,
+    LastCpu,
+    Affinity,
     Time,
     Container,
     Service,
@@ -256,6 +264,8 @@ impl SortColumn {
             Self::IoRead,
             Self::IoWrite,
             Self::Iops,
+            Self::LastCpu,
+            Self::Affinity,
             Self::Time,
             Self::Container,
             Self::Service,
@@ -283,6 +293,8 @@ impl SortColumn {
             Self::IoRead => "RD/s",
             Self::IoWrite => "WR/s",
             Self::Iops => "IOPS",
+            Self::LastCpu => "CPU",
+            Self::Affinity => "AFFINITY",
             Self::Time => "TIME+",
             Self::Container => "CONT",
             Self::Service => "UNIT",
@@ -311,6 +323,8 @@ impl SortColumn {
             Self::IoRead => 8,
             Self::IoWrite => 8,
             Self::Iops => 6,
+            Self::LastCpu => 4,
+            Self::Affinity => 12,
             Self::Time => 10,
             Self::Container => 12,
             Self::Service => 16,
@@ -354,6 +368,13 @@ pub fn compare_processes(a: &ProcessInfo, b: &ProcessInfo, col: SortColumn, asce
         SortColumn::IoRead => quantize(a.io_read_rate).cmp(&quantize(b.io_read_rate)).then(a.pid.cmp(&b.pid)),
         SortColumn::IoWrite => quantize(a.io_write_rate).cmp(&quantize(b.io_write_rate)).then(a.pid.cmp(&b.pid)),
         SortColumn::Iops => quantize(a.iops).cmp(&quantize(b.iops)).then(a.pid.cmp(&b.pid)),
+        SortColumn::LastCpu => a.last_cpu.cmp(&b.last_cpu).then(a.pid.cmp(&b.pid)),
+        // Most restricted first when ascending, then by the CPUs themselves.
+        SortColumn::Affinity => a
+            .nr_cpus_allowed
+            .cmp(&b.nr_cpus_allowed)
+            .then_with(|| a.affinity.cmp(&b.affinity))
+            .then(a.pid.cmp(&b.pid)),
         SortColumn::Time => quantize(a.cpu_time_secs).cmp(&quantize(b.cpu_time_secs)).then(a.pid.cmp(&b.pid)),
         SortColumn::Container => a.container.cmp(&b.container).then(a.pid.cmp(&b.pid)),
         SortColumn::Service => a.service.cmp(&b.service).then(a.pid.cmp(&b.pid)),
@@ -467,6 +488,9 @@ mod tests {
             io_write_rate: 0.0,
             iops: 0.0,
             cpu_time_secs: 0.0,
+            last_cpu: None,
+            affinity: Text::from("all"),
+            nr_cpus_allowed: 0,
             start_time_ns: 0,
             comm: Text::from("test"),
             cmdline: Text::from("test"),

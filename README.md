@@ -23,6 +23,7 @@ I worked closely with Claude Code while building this. Claude has touched many p
 - Per-process network I/O via fexit hooks on TCP/UDP (IPv4 and IPv6) send/recv, with a kprobe fallback for older kernels (`N` to toggle). This also happens in BPF, with no extra syscalls
 - Per-process disk I/O: storage read/write rates and IOPS (read+write syscalls/s) from the kernel's I/O accounting, collected in the same BPF walk (`D` to toggle)
 - Threads view (`H`), with per-thread state and CPU
+- Reserved CPUs: CPUs held by a cgroup v2 cpuset partition (or `isolcpus`) are marked in the CPU meters and named on the info line, and bpftop's BPF hooks stay off them; see below. `C` shows each process's (or thread's) last CPU and allowed CPUs
 - NVIDIA GPU usage per process (VRAM and utilization)
 - cgroup v2 freeze/thaw: freeze whole services or containers atomically (`f`); see below
 - Vim keybindings, folding, visual mode, and yank to clipboard (works in tmux)
@@ -40,6 +41,14 @@ Suspending with SIGTSTP/SIGCONT isn't a clean alternative. The process and its p
 cgroup v2 has a better mechanism. Writing to `cgroup.freeze` stops scheduling everything in the cgroup atomically. The processes aren't notified, new forks start frozen, and only someone with write access to cgroupfs can thaw them. The one side effect is that wall-clock time keeps moving, so a frozen process sees a jump when it resumes.
 
 In bpftop, `f` freezes the selected process's cgroup, `u` thaws it after a confirmation, and `U` thaws it immediately. Frozen processes are marked in the table.
+
+# Reserved CPUs
+
+A cpuset partition (`cpuset.cpus.partition` set to `root` or `isolated`) gives a cgroup CPUs that nothing outside it may use, which is how benchmarks and latency-sensitive work get quiet cores without a reboot. bpftop notices partitions by re-reading the root cgroup's `cpuset.cpus.effective` and `cpuset.cpus.isolated` on each refresh. It colors the labels of the reserved CPUs in the meters and names the partitions on the info line (`Reserved: 12-15,28-31 bench.slice`).
+
+BPF attachments are global, so bpftop's exec/exit tracepoints and network probes would otherwise run on reserved CPUs too, adding work to whatever runs there. While CPUs are reserved, every hook first checks the CPU it runs on and returns at once on a reserved one; what remains there is the kernel calling into the hook. The task iterator runs on bpftop's own CPU and is unaffected. The trade-off is that processes on reserved CPUs show no network bytes, and their command lines come from `/proc/<pid>/cmdline` (read once per process, and again after it execs) instead of the exec hook.
+
+`C` adds two columns: `CPU`, where the process (or thread, with `H`) last ran, and `AFFINITY`, the CPUs it may run on (`all` for every online CPU). Press it again to sort by affinity, and a third time to hide them.
 
 # How to install
 

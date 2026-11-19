@@ -19,6 +19,28 @@ impl std::ops::AddAssign for IoCounters {
     }
 }
 
+/// CPUs covered by `CpuPlacement::cpus_allowed` (0 to this - 1).
+pub const CPU_MASK_CPUS: usize = 256;
+
+/// Where a task runs and may run.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub struct CpuPlacement {
+    /// The CPU the task last ran on; `u32::MAX` if the kernel doesn't say.
+    pub cpu: u32,
+    /// How many CPUs the task may run on (all of them, not only the
+    /// first `CPU_MASK_CPUS`).
+    pub nr_cpus_allowed: u32,
+    /// The CPUs the task may run on: bit `n % 64` of word `n / 64` is CPU n.
+    pub cpus_allowed: [u64; CPU_MASK_CPUS / 64],
+}
+
+impl CpuPlacement {
+    pub fn last_cpu(&self) -> Option<u32> {
+        (self.cpu != u32::MAX).then_some(self.cpu)
+    }
+}
+
 /// Process/task information collected by the eBPF task iterator.
 /// This struct is written by the eBPF program and read by userspace.
 #[repr(C)]
@@ -70,6 +92,7 @@ pub struct TaskInfo {
     /// 1 if the task has PF_KTHREAD set.
     pub kthread: u8,
     pub _pad2: [u8; 6],
+    pub placement: CpuPlacement,
 }
 
 /// One live non-leader thread, emitted by the task iterator in place of a
@@ -89,6 +112,7 @@ pub struct ThreadRec {
     /// Thread name, null-terminated
     pub comm: [u8; 16],
     pub io: IoCounters,
+    pub placement: CpuPlacement,
 }
 
 /// Command line event captured by sched_process_exec tracepoint.
@@ -117,9 +141,9 @@ pub struct NetStats {
 }
 
 // Keep in sync with bpftop-ebpf-c/bpftop.bpf.c (asserted on both sides).
-const _: () = assert!(core::mem::size_of::<TaskInfo>() == 168);
+const _: () = assert!(core::mem::size_of::<TaskInfo>() == 208);
 const _: () = assert!(core::mem::size_of::<CmdlineEvent>() == 280);
-const _: () = assert!(core::mem::size_of::<ThreadRec>() == 72);
+const _: () = assert!(core::mem::size_of::<ThreadRec>() == 112);
 
 /// Parsed output of one task iterator walk.
 #[derive(Debug, Default)]
@@ -197,7 +221,16 @@ mod tests {
     }
 
     fn thread(pid: u32, tid: u32, cpu_ns: u64) -> ThreadRec {
-        ThreadRec { pid, tid, cpu_ns, state: 0, _pad: 0, comm: [0; 16], io: IoCounters::default() }
+        ThreadRec {
+            pid,
+            tid,
+            cpu_ns,
+            state: 0,
+            _pad: 0,
+            comm: [0; 16],
+            io: IoCounters::default(),
+            placement: CpuPlacement::default(),
+        }
     }
 
     #[test]
@@ -224,6 +257,6 @@ mod tests {
 
         let mut buf = bytes(&thread(1, 2, 3));
         buf.extend_from_slice(&[0; 4]);
-        assert_eq!(parse_iter_records(&buf).unwrap_err(), 72);
+        assert_eq!(parse_iter_records(&buf).unwrap_err(), 112);
     }
 }

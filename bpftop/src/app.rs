@@ -90,6 +90,8 @@ pub struct App {
     // Column toggles
     pub show_net: bool,
     pub show_io: bool,
+    /// CPU and AFFINITY columns.
+    pub show_cpu: bool,
     pub show_gpu: bool,
 
     // Service display mode
@@ -192,6 +194,7 @@ impl App {
             collapsed_pids: HashSet::new(),
             show_net: false,
             show_io: false,
+            show_cpu: false,
             show_gpu: true,
             service_display_mode: ServiceDisplayMode::ServiceOnly,
             service_cache: HashMap::new(),
@@ -379,6 +382,7 @@ impl App {
             show_gpu: self.show_gpu && has_gpu,
             show_net: self.show_net,
             show_io: self.show_io,
+            show_cpu: self.show_cpu,
             visual_range: self.visual_range(),
             error_message: self.ebpf_error.as_deref(),
         };
